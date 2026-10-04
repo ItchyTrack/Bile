@@ -5,7 +5,7 @@ members = [
 	"crates/bile-math",
 	"crates/bile-scene",
 	"crates/bile-scene-source",
-	"crates/bile-tile-sources",
+	"crates/bile-component-sources",
 	"crates/bile-tiles",
 	"crates/bile",
 	"crates/bile-demo-app",
@@ -21,8 +21,10 @@ debug = true
 [workspace.dependencies]
 bevy = "0.19"
 bevy_ecs = "0.19"
+bevy-trait-query = "0.19.0"
 crossbeam-channel = "0.5.15"
 wgpu = "29.0.3"
+serde = "1.0.229"
 log = "0.4"
 num = "0.4.3"
 bytemuck = { version = "1.24", features = ["derive"] }
@@ -35,7 +37,7 @@ bile-math = { version = "0.1.0", path = "crates/bile-math" }
 bile-scene = { version = "0.1.0", path = "crates/bile-scene" }
 bile-scene-source = { version = "0.1.0", path = "crates/bile-scene-source" }
 bile-tiles = { version = "0.1.0", path = "crates/bile-tiles" }
-bile-tile-sources = { version = "0.1.0", path = "crates/bile-tile-sources" }
+bile-component-sources = { version = "0.1.0", path = "crates/bile-component-sources" }
 bile = { version = "0.1.0", path = "crates/bile" }
 
 [workspace.lints.clippy]

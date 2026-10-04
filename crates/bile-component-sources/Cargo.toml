@@ -1,5 +1,5 @@
 [package]
-name = "bile-tile-sources"
+name = "bile-component-sources"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,8 +9,10 @@ gpu_profiling = []
 
 [dependencies]
 bevy = { workspace = true }
+bevy-trait-query = { workspace = true }
 bile-math = { workspace = true }
 bile-scene = { workspace = true }
+bile-tiles = { workspace = true }
 
 [lints]
 workspace = true
