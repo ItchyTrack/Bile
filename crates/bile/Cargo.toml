@@ -13,7 +13,6 @@ bile-math = { workspace = true }
 bile-scene = { workspace = true }
 bile-scene-source = { workspace = true }
 bile-tiles = { workspace = true }
-bile-component-sources = { workspace = true }
 
 [lints]
 workspace = true
