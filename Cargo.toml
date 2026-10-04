@@ -7,6 +7,7 @@ members = [
 	"crates/bile-scene-source",
 	"crates/bile-tile-sources",
 	"crates/bile-tiles",
+	"crates/bile",
 	"crates/bile-demo-app",
 ]
 

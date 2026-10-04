@@ -11,7 +11,7 @@ gpu_profiling = []
 bevy = { workspace = true }
 bile-math = { workspace = true }
 bile-scene = { workspace = true }
-bile-scene-sources = { workspace = true }
+bile-scene-source = { workspace = true }
 bile-tiles = { workspace = true }
 bile-tile-sources = { workspace = true }
 

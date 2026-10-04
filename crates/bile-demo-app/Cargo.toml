@@ -9,6 +9,7 @@ gpu_profiling = []
 
 [dependencies]
 bevy = { workspace = true }
+bile = { workspace = true }
 
 [lints]
 workspace = true
