@@ -1,9 +1,12 @@
-use bevy::prelude::*;
+use bevy::{prelude::*};
+
+mod render_mesh_omponent_source;
 
 fn main() {
 	App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(bile::DefaultBilePlugins)
+        .add_plugins(render_mesh_omponent_source::RenderMeshComponentSourcePlugin)
         .add_systems(Startup, scene.spawn())
         .run();
 }
@@ -18,7 +21,7 @@ fn scene() -> impl SceneList {
         ),
         (
             #Cube
-            Mesh3d(asset_value(Cuboid::new(1.0, 1.0, 1.0)))
+            // Mesh3d(asset_value(Cuboid::new(1.0, 1.0, 1.0)))
             MeshMaterial3d::<StandardMaterial>(asset_value(Color::srgb_u8(124, 144, 255)))
             Transform::from_xyz(0.0, 0.5, 0.0)
         ),
