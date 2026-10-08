@@ -1,3 +1,5 @@
-mod scene_node;
+mod node;
+mod bounds;
 
-pub use scene_node::{SceneNode, SceneTrasform};
+pub use node::SceneNode;
+pub use bounds::NodeBounds;
