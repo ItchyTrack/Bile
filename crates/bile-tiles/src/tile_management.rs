@@ -64,13 +64,40 @@ impl TileInstances {
 }
 
 pub fn modify_tile_classes(
+	mut commands: Commands,
 	mut tile_instances: Query<&mut TileInstances, Without<DesiredComponents>>,
 	mut desired_components: Query<&mut DesiredComponents, Without<TileInstances>>,
 ) {
 	for mut tile_instance in &mut tile_instances {
-		for tile_class_addition in tile_instance.tile_class_additions.drain() {
-			// tile_instance.key_to_entity.get()
+		for tile_class_addition in std::mem::replace(&mut tile_instance.tile_class_additions, default()) {
+			if let Some(entity) = tile_instance.get(tile_class_addition.0) {
+				let Ok(mut desired_component) = desired_components.get_mut(*entity) else {
+					bevy::log::error!("desired_component was not found for entity {}", entity);
+					continue;
+				};
+				let mut entity_commands = commands.entity(*entity);
+				for class_addition in tile_class_addition.1 {
+					if desired_component.update_class(class_addition.0, class_addition.1) {
+						if class_addition.1 > 0 {
+							unsafe { entity_commands.insert_by_id(class_addition.0, ()); }
+						} else {
+							entity_commands.remove_by_id(class_addition.0);
+						}
+					}
+				}
+			} else {
+				let mut desired_component = DesiredComponents::default();
+				for class_addition in tile_class_addition.1 {
+					desired_component.update_class(class_addition.0, class_addition.1);
+				}
+				if desired_component.get_classes().is_empty() { continue };
 
+				let mut entity_commands = commands.spawn(tile_class_addition.0);
+				for component_id in desired_component.get_classes().keys() {
+					unsafe { entity_commands.insert_by_id(*component_id, ()); }
+				}
+				entity_commands.insert(desired_component);
+			}
 		}
 	}
 }

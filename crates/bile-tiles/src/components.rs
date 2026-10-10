@@ -6,6 +6,7 @@ use crate::{TileKey, component_source::ComponentSource};
 
 #[derive(Debug, Component, Default)]
 pub struct DesiredComponents {
+	classes: HashMap<ComponentId, u32>,
 	components: HashMap<ComponentId, u32>,
 	components_by_class: HashMap<ComponentId, HashMap<ComponentId, u32>>,
 	newly_desired_components: HashSet<ComponentId>,
@@ -22,8 +23,14 @@ impl DesiredComponents {
 		});
 	}
 	pub fn remove_desired_component(&mut self, class_id: ComponentId, component_id: ComponentId) {
-		let Some(components_for_class) = self.components_by_class.get_mut(&class_id) else { return; };
-		let Some(desired_count) = components_for_class.get_mut(&component_id) else { return; };
+		let Some(components_for_class) = self.components_by_class.get_mut(&class_id) else {
+			bevy::log::warn!("Negative want on component. This should not happen with correct usage.");
+			return;
+		};
+		let Some(desired_count) = components_for_class.get_mut(&component_id) else {
+			bevy::log::warn!("Negative want on component. This should not happen with correct usage.");
+			return;
+		};
 		if *desired_count == 1 {
 			if components_for_class.len() == 1 {
 				self.components_by_class.remove(&class_id);
@@ -41,6 +48,33 @@ impl DesiredComponents {
 		} else {
 			*desired_count -= 1;
 		}
+	}
+	// returns if a update needs to be made. desired_delta > 0 means add. desired_delta < 0 means remove.
+	pub(crate) fn update_class(&mut self, component_id: ComponentId, desired_delta: i32) -> bool {
+		let Some(counter) = self.classes.get_mut(&component_id) else {
+			if desired_delta > 0 {
+				self.classes.insert(component_id, desired_delta as u32);
+				return true;
+			}
+			bevy::log::warn!("Negative want on class. This should not happen with correct usage.");
+			return false;
+		};
+		match (*counter as i32).cmp(&-desired_delta) {
+			std::cmp::Ordering::Less => {
+				bevy::log::warn!("Negative want on class. This should not happen with correct usage.");
+			},
+			std::cmp::Ordering::Equal => {
+				self.classes.remove(&component_id);
+				return true;
+			},
+			std::cmp::Ordering::Greater => {
+				*counter += (*counter as i32 + desired_delta) as u32
+			},
+		};
+		false
+	}
+	pub(crate) fn get_classes(&self) -> &HashMap<ComponentId, u32> {
+		&self.classes
 	}
 }
 

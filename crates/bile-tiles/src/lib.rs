@@ -9,6 +9,7 @@ pub use components::DesiredComponents;
 pub use index::{TileIndex, TileIndexKey, TileKeyMap};
 pub use key::TileKey;
 pub use component_source::{ComponentSource, FinishedRequestMessage};
+pub use tile_management::TileInstances;
 
 #[derive(Default)]
 pub struct TileDataPlugin;
@@ -17,9 +18,12 @@ impl Plugin for TileDataPlugin {
 	fn build(&self, app: &mut App) {
 		app.add_systems(Update,
 			(
-				components::remove_newly_undesired_components,
-				components::request_newly_desired,
-			)
+				tile_management::modify_tile_classes,
+				(
+					components::remove_newly_undesired_components,
+					components::request_newly_desired
+				),
+			).chain()
 		);
 	}
 }
