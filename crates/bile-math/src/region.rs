@@ -1,4 +1,4 @@
-use bevy::math::{IVec3, UVec3};
+use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Returned when a nonzero region is constructed with a zero-sized axis.

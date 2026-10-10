@@ -1,6 +1,6 @@
 use bevy::{ecs::component::Component, math::{IVec3, UVec3}};
 
-use bile_math::region::NonZeroRegion;
+use bile_math::NonZeroRegion;
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TileKey {

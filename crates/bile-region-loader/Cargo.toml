@@ -1,0 +1,17 @@
+[package]
+name = "bile-region-loader"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+tracy = ["tracy-client/enable"]
+
+[dependencies]
+bevy = { workspace = true }
+tracy-client = { workspace = true }
+bile-math = { workspace = true }
+bile-tiles = { workspace = true }
+
+[lints]
+workspace = true

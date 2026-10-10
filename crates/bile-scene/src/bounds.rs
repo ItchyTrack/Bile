@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bile_math::region::NonZeroRegion;
+use bile_math::NonZeroRegion;
 
 #[derive(Component)]
 pub struct NodeBounds {

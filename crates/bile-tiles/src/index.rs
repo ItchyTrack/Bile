@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use bevy::math::{IVec3, UVec3};
-use bile_math::region::NonZeroRegion;
+use bevy::prelude::*;
+use bile_math::NonZeroRegion;
 
 use crate::TileKey;
 

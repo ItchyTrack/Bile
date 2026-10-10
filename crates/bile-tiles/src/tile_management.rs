@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy::ecs::component::ComponentId;
-use bile_math::region::NonZeroRegion;
+use bile_math::NonZeroRegion;
 
 use crate::{DesiredComponents, TileKey, TileKeyMap};
 

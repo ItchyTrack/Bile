@@ -3,9 +3,10 @@ resolver = "3"
 
 members = [
 	"crates/bile-math",
+	"crates/bile-tiles",
 	"crates/bile-scene",
 	"crates/bile-scene-source",
-	"crates/bile-tiles",
+	"crates/bile-region-loader",
 	"crates/bile",
 	"crates/bile-demo-app",
 ]
@@ -33,9 +34,10 @@ rustc-hash = "2.1.2"
 tokio = "1"
 futures = "0.3.32"
 bile-math = { version = "0.1.0", path = "crates/bile-math" }
+bile-tiles = { version = "0.1.0", path = "crates/bile-tiles" }
 bile-scene = { version = "0.1.0", path = "crates/bile-scene" }
 bile-scene-source = { version = "0.1.0", path = "crates/bile-scene-source" }
-bile-tiles = { version = "0.1.0", path = "crates/bile-tiles" }
+bile-region-loader = { version = "0.1.0", path = "crates/bile-region-loader" }
 bile = { version = "0.1.0", path = "crates/bile" }
 
 [workspace.lints.clippy]
