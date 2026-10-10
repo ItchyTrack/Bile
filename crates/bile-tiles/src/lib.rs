@@ -2,10 +2,11 @@ mod key;
 mod index;
 mod components;
 mod component_source;
+mod tile_management;
 
 use bevy::prelude::*;
 pub use components::DesiredComponents;
-pub use index::{TileIndex, TileIndexKey};
+pub use index::{TileIndex, TileIndexKey, TileKeyMap};
 pub use key::TileKey;
 pub use component_source::{ComponentSource, FinishedRequestMessage};
 

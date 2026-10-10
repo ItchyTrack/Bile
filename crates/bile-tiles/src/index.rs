@@ -1,20 +1,23 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::hash::Hash;
 
 use bevy::math::{IVec3, UVec3};
 use bile_math::region::NonZeroRegion;
 
-pub trait TileIndexKey: Copy + Eq + Hash {
+use crate::TileKey;
+
+pub trait TileIndexKey: Debug + Copy + Eq + Hash {
 	fn region(self) -> NonZeroRegion;
 }
 
 #[derive(Debug, Clone)]
-pub struct TileIndex<K> {
+pub struct TileIndex<K: TileIndexKey> {
 	bins: HashMap<(u8, IVec3), Vec<K>>,
 	max_lod: u8,
 }
 
-impl<K> Default for TileIndex<K> {
+impl<K: TileIndexKey> Default for TileIndex<K> {
 	fn default() -> Self {
 		Self { bins: HashMap::new(), max_lod: 0 }
 	}
@@ -109,4 +112,54 @@ fn align_to_lod_bin(pos: IVec3, lod: u8) -> IVec3 {
 
 fn lod_bin_size(lod: u8) -> i32 {
 	1i32 << lod
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TileMapIndexKey(TileKey);
+
+impl TileIndexKey for TileMapIndexKey {
+	fn region(self) -> NonZeroRegion {
+		self.0.region
+	}
+}
+
+#[derive(Debug, Clone)]
+pub struct TileKeyMap<V> {
+	map: HashMap<TileKey, V>,
+	index: TileIndex<TileMapIndexKey>,
+}
+
+impl<V> Default for TileKeyMap<V> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            index: TileIndex::default(),
+        }
+    }
+}
+
+impl<V> TileKeyMap<V> {
+	pub fn insert(&mut self, tile_key: TileKey, value: V) -> Option<V> {
+		let out = self.map.insert(tile_key, value);
+		if out.is_none() {
+			self.index.insert(TileMapIndexKey(tile_key));
+		}
+		out
+	}
+	pub fn remove(&mut self, tile_key: TileKey) -> Option<V> {
+		let out = self.map.remove(&tile_key);
+		if out.is_some() {
+			self.index.remove(TileMapIndexKey(tile_key));
+		}
+		out
+	}
+	pub fn get(&mut self, tile_key: TileKey) -> Option<&V> {
+		self.map.get(&tile_key)
+	}
+	pub fn for_each_overlapping(&self, region: NonZeroRegion, mut f: impl FnMut(TileKey)) {
+		self.index.for_each_overlapping(region, |v| f(v.0));
+	}
+	pub fn keys_covering_point(&self, point: IVec3) -> Vec<TileKey> {
+		self.index.keys_covering_point(point).iter().map(|v| v.0).collect()
+	}
 }
