@@ -19,7 +19,7 @@ impl RenderMeshComponentSource {
 }
 
 impl ComponentSource for RenderMeshComponentSource {
-	fn component_cost(&self, _entity: Entity, _tile_key: TileKey, component: ComponentId) -> Option<f32>  {
+	fn component_cost(&self, _entity: Entity, _tile_key: TileKey, component: ComponentId) -> Option<f32> {
 		if component == self.mesh3d_component_id { Some(1.0) } else { None }
 	}
 

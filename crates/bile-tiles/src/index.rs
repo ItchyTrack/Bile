@@ -130,12 +130,12 @@ pub struct TileKeyMap<V> {
 }
 
 impl<V> Default for TileKeyMap<V> {
-    fn default() -> Self {
-        Self {
-            map: HashMap::new(),
-            index: TileIndex::default(),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			map: HashMap::new(),
+			index: TileIndex::default(),
+		}
+	}
 }
 
 impl<V> TileKeyMap<V> {
