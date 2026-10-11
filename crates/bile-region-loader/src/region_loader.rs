@@ -16,7 +16,7 @@ pub enum CoverageDebugState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverageDebugTile {
-	pub grid: Entity,
+	pub entity: Entity,
 	pub region: Region,
 	pub lod: u8,
 	pub state: CoverageDebugState,
@@ -24,7 +24,7 @@ pub struct CoverageDebugTile {
 
 #[derive(Component, Default, Debug)]
 pub struct RegionLoader {
-	pub(crate) regions: HashMap<GridId, Vec<LodBand>>,
+	pub(crate) regions: HashMap<Entity, Vec<LodBand>>,
 	pub(crate) tiles: TileLifecycle,
 }
 
@@ -51,11 +51,11 @@ impl RegionLoader {
 		}
 		let mut tiles: Vec<_> = states
 			.into_iter()
-			.map(|(key, state)| CoverageDebugTile { grid: key.grid, region: key.tile_key.region.into(), lod: key.tile_key.lod, state })
+			.map(|(key, state)| CoverageDebugTile { entity: key.entity, region: key.tile_key.region.into(), lod: key.tile_key.lod, state })
 			.collect();
 		tiles.sort_by_key(|tile| {
 			let min = tile.region.min();
-			(tile.grid.to_bits(), tile.lod, min.x, min.y, min.z)
+			(tile.entity.to_bits(), tile.lod, min.x, min.y, min.z)
 		});
 		tiles
 	}

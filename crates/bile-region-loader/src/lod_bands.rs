@@ -50,7 +50,7 @@ fn is_tile_in_band(band: LodBand, min: IVec3) -> bool {
 pub(crate) fn run_over_diff(
 	old_bands: &[LodBand],
 	new_bands: &[LodBand],
-	streaming: &GridStreaming,
+	streaming: &EntityStreaming,
 	mut f: impl FnMut(u8, IVec3, bool),
 ) {
 	let Some(max_lod) = old_bands.iter().chain(new_bands.iter()).map(|band| band.lod).max() else { return };
@@ -83,7 +83,7 @@ fn band_boxes(bands: &[LodBand], lod: u8) -> (Region, Region) {
 	}
 }
 
-fn emit_minus<F: FnMut(u8, IVec3, bool)>(region: Region, cut: Region, lod: u8, size: u32, added: bool, streaming: &GridStreaming, f: &mut F) {
+fn emit_minus<F: FnMut(u8, IVec3, bool)>(region: Region, cut: Region, lod: u8, size: u32, added: bool, streaming: &EntityStreaming, f: &mut F) {
 	for slab in region_minus_region(region, cut) {
 		emit_region(slab, lod, size, added, streaming, f);
 	}
@@ -96,7 +96,7 @@ fn emit_minus_minus<F: FnMut(u8, IVec3, bool)>(
 	lod: u8,
 	size: u32,
 	added: bool,
-	streaming: &GridStreaming,
+	streaming: &EntityStreaming,
 	f: &mut F,
 ) {
 	for slab in region_minus_region(region, cut_a) {
@@ -123,7 +123,7 @@ fn region_minus_region(a: Region, b: Region) -> [Region; 6] {
 	]
 }
 
-fn emit_region<F: FnMut(u8, IVec3, bool)>(region: Region, lod: u8, size: u32, added: bool, streaming: &GridStreaming, f: &mut F) {
+fn emit_region<F: FnMut(u8, IVec3, bool)>(region: Region, lod: u8, size: u32, added: bool, streaming: &EntityStreaming, f: &mut F) {
 	if region.is_empty() {
 		return;
 	}

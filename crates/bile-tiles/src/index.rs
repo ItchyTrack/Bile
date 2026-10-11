@@ -13,22 +13,21 @@ pub trait TileIndexKey: Debug + Copy + Eq + Hash {
 
 #[derive(Debug, Clone)]
 pub struct TileIndex<K: TileIndexKey> {
-	bins: HashMap<(u8, IVec3), Vec<K>>,
-	max_lod: u8,
+	bins: HashMap<u8, HashMap<IVec3, Vec<K>>>,
 }
 
 impl<K: TileIndexKey> Default for TileIndex<K> {
 	fn default() -> Self {
-		Self { bins: HashMap::new(), max_lod: 0 }
+		Self { bins: default() }
 	}
 }
 
 impl<K: TileIndexKey> TileIndex<K> {
 	pub fn insert(&mut self, key: K) {
 		let lod = bin_lod(key.region().size());
-		self.max_lod = self.max_lod.max(lod);
+		let level = self.bins.entry(lod).or_default();
 		for_each_bin_intersecting_key(key, lod, |bin| {
-			let keys = self.bins.entry((lod, bin)).or_default();
+			let keys = level.entry(bin).or_default();
 			if !keys.contains(&key) {
 				keys.push(key);
 			}
@@ -37,23 +36,24 @@ impl<K: TileIndexKey> TileIndex<K> {
 
 	pub fn remove(&mut self, key: K) {
 		let lod = bin_lod(key.region().size());
+		let Some(level) = self.bins.get_mut(&lod) else { return };
 		for_each_bin_intersecting_key(key, lod, |bin| {
-			let Some(keys) = self.bins.get_mut(&(lod, bin)) else { return };
+			let Some(keys) = level.get_mut(&bin) else { return };
 			keys.retain(|candidate| *candidate != key);
 			if keys.is_empty() {
-				self.bins.remove(&(lod, bin));
+				level.remove(&bin);
 			}
 		});
-		if lod == self.max_lod && !self.bins.keys().any(|(lod, _)| *lod == self.max_lod) {
-			self.max_lod = self.bins.keys().map(|(lod, _)| *lod).max().unwrap_or(0);
+		if level.is_empty() {
+			self.bins.remove(&lod);
 		}
 	}
 
 	pub fn for_each_overlapping(&self, region: NonZeroRegion, mut f: impl FnMut(K)) {
 		let mut seen = HashSet::new();
-		for lod in 0..=self.max_lod {
+		for (&lod, level) in &self.bins {
 			for_each_bin_intersecting_region(region, lod, |bin| {
-				let Some(keys) = self.bins.get(&(lod, bin)) else { return };
+				let Some(keys) = level.get(&bin) else { return };
 				for &key in keys {
 					if region.intersects(key.region()) && seen.insert(key) {
 						f(key);
@@ -66,9 +66,9 @@ impl<K: TileIndexKey> TileIndex<K> {
 	pub fn keys_covering_point(&self, point: IVec3) -> Vec<K> {
 		let mut out = Vec::new();
 		let mut seen = HashSet::new();
-		for lod in 0..=self.max_lod {
+		for (&lod, level) in &self.bins {
 			let bin = align_to_lod_bin(point, lod);
-			let Some(keys) = self.bins.get(&(lod, bin)) else { continue };
+			let Some(keys) = level.get(&bin) else { continue };
 			for &key in keys {
 				if key.region().contains(point) && seen.insert(key) {
 					out.push(key);

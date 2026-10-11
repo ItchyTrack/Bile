@@ -2,19 +2,19 @@ use std::collections::{HashMap, HashSet};
 
 use bile_math::NonZeroRegion;
 
-use crate::{types::GridTileKey, unresolved_tile_index::UnresolvedTileIndex};
+use crate::{types::EntityTileKey, unresolved_tile_index::UnresolvedTileIndex};
 
 /// Tracks pending coverage and the loaded tiles retained until that coverage resolves.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Coverage {
 	pending: UnresolvedTileIndex,
-	replacements_by_source: HashMap<GridTileKey, HashSet<GridTileKey>>,
-	sources_by_replacement: HashMap<GridTileKey, HashSet<GridTileKey>>,
+	replacements_by_source: HashMap<EntityTileKey, HashSet<EntityTileKey>>,
+	sources_by_replacement: HashMap<EntityTileKey, HashSet<EntityTileKey>>,
 }
 
 impl Coverage {
-	pub(crate) fn debug_tiles(&self) -> Vec<(GridTileKey, bool, bool)> {
-		let mut roles: HashMap<GridTileKey, (bool, bool)> = HashMap::new();
+	pub(crate) fn debug_tiles(&self) -> Vec<(EntityTileKey, bool, bool)> {
+		let mut roles: HashMap<EntityTileKey, (bool, bool)> = HashMap::new();
 		for key in self.pending.keys() {
 			roles.entry(key).or_default().0 = true;
 		}
@@ -24,14 +24,14 @@ impl Coverage {
 		let mut tiles: Vec<_> = roles.into_iter().map(|(key, (pending, retained))| (key, pending, retained)).collect();
 		tiles.sort_by_key(|(key, _, _)| {
 			let min = key.tile_key.region.min();
-			(key.grid.to_bits(), key.tile_key.lod, min.x, min.y, min.z)
+			(key.entity.to_bits(), key.tile_key.lod, min.x, min.y, min.z)
 		});
 		tiles
 	}
 
 	/// Registers coverage that is now wanted. If the tile was previously being retained, reverse
 	/// that handoff so its former replacements can be removed once this tile is available again.
-	pub(crate) fn set_wanted(&mut self, key: GridTileKey) {
+	pub(crate) fn set_wanted(&mut self, key: EntityTileKey) {
 		if self.pending.contains(key) {
 			return;
 		}
@@ -55,7 +55,7 @@ impl Coverage {
 
 	/// Marks wanted coverage as resolved (visible or empty) and returns retained tiles that it now safely replaces.
 	#[must_use = "tiles returned by Coverage must be removed from loader, render, and streaming state"]
-	pub(crate) fn set_resolved(&mut self, key: GridTileKey) -> Vec<GridTileKey> {
+	pub(crate) fn set_resolved(&mut self, key: EntityTileKey) -> Vec<EntityTileKey> {
 		self.pending.remove(key);
 		self.apply_satisfied(key)
 	}
@@ -63,7 +63,7 @@ impl Coverage {
 	/// Removes a tile from the wanted set and returns tiles whose requests or coverage can now be
 	/// removed without opening a hole.
 	#[must_use = "tiles returned by Coverage must be removed from loader, render, and streaming state"]
-	pub(crate) fn set_unwanted(&mut self, key: GridTileKey) -> Vec<GridTileKey> {
+	pub(crate) fn set_unwanted(&mut self, key: EntityTileKey) -> Vec<EntityTileKey> {
 		if self.pending.remove(key) {
 			let mut removable = self.apply_satisfied(key);
 			if !self.replacements_by_source.contains_key(&key) {
@@ -78,7 +78,7 @@ impl Coverage {
 
 		let mut replacements = HashSet::new();
 		if let Some(region) = NonZeroRegion::new(key.tile_key.region.min(), key.tile_key.region.size()) {
-			self.pending.for_each_in_region(key.grid, key.tile_key.class, region, u8::MAX, Some(key.tile_key.lod), |candidate| {
+			self.pending.for_each_in_region(key.entity, region, Some(key.tile_key.lod), |candidate| {
 				replacements.insert(candidate);
 			});
 		}
@@ -92,7 +92,7 @@ impl Coverage {
 		}
 	}
 
-	fn add_dependency(&mut self, source: GridTileKey, replacement: GridTileKey) {
+	fn add_dependency(&mut self, source: EntityTileKey, replacement: EntityTileKey) {
 		if source == replacement {
 			return;
 		}
@@ -101,7 +101,7 @@ impl Coverage {
 		}
 	}
 
-	fn apply_satisfied(&mut self, key: GridTileKey) -> Vec<GridTileKey> {
+	fn apply_satisfied(&mut self, key: EntityTileKey) -> Vec<EntityTileKey> {
 		let mut satisfied = HashSet::from([key]);
 		let mut pending = vec![key];
 		let mut removable = Vec::new();
@@ -135,7 +135,7 @@ impl Coverage {
 		self.only_unwanted(removable)
 	}
 
-	fn detach_source(&mut self, source: GridTileKey) -> Option<HashSet<GridTileKey>> {
+	fn detach_source(&mut self, source: EntityTileKey) -> Option<HashSet<EntityTileKey>> {
 		let replacements = self.replacements_by_source.remove(&source)?;
 		for replacement in &replacements {
 			let Some(sources) = self.sources_by_replacement.get_mut(replacement) else { continue };
@@ -147,14 +147,14 @@ impl Coverage {
 		Some(replacements)
 	}
 
-	fn only_unwanted(&self, tiles: Vec<GridTileKey>) -> Vec<GridTileKey> {
+	fn only_unwanted(&self, tiles: Vec<EntityTileKey>) -> Vec<EntityTileKey> {
 		let mut seen = HashSet::new();
 		tiles.into_iter().filter(|key| !self.pending.contains(*key) && seen.insert(*key)).collect()
 	}
 }
 
-fn tiles_overlap(a: GridTileKey, b: GridTileKey) -> bool {
-	a.grid == b.grid
+fn tiles_overlap(a: EntityTileKey, b: EntityTileKey) -> bool {
+	a.entity == b.entity
 		&& a.tile_key.region.min().cmplt(b.tile_key.region.min() + b.tile_key.region.size().as_ivec3()).all()
 		&& b.tile_key.region.min().cmplt(a.tile_key.region.min() + a.tile_key.region.size().as_ivec3()).all()
 }
