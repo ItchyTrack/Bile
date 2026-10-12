@@ -12,6 +12,7 @@ bevy = { workspace = true }
 tracy-client = { workspace = true }
 bile-math = { workspace = true }
 bile-tiles = { workspace = true }
+bile-scene
 
 [lints]
 workspace = true

@@ -22,7 +22,7 @@ fn acquire_tile(
 
 pub(crate) fn update_region_loader_requests(
 	freeze: Res<FreezeRegionLoader>,
-	mut cameras: Query<(Entity, &Camera, &GlobalTransform, &mut RegionLoader), With<Camera3d>>,
+	mut cameras: Query<(Entity, &GlobalTransform, &mut RegionLoader)>,
 	mut streaming: ParamSet<(
 		TileRequester,
 		Query<(Entity, &GlobalTransform, &EntityStreaming)>,
@@ -98,10 +98,7 @@ pub(crate) fn receive_region_loader_results(
 pub(crate) fn refresh_region_loader_visibility(
 	mut availability_events: MessageReader<ChunkAvailabilityChanged>,
 	mut cameras: Query<(Entity, &mut RegionLoader)>,
-	mut requester_streaming: ParamSet<(
-		TileRequester,
-		Query<(&EntityStreaming, Option<&TileBuildingParameters>)>,
-	)>,
+	mut node_bounds: Query<&NodeBounds>,
 ) {
 	let availability_events: Vec<_> = availability_events.read().copied().collect();
 
@@ -118,7 +115,7 @@ pub(crate) fn refresh_region_loader_visibility(
 					ChunkAvailabilityChangeKind::BecamePresent => {
 						let Some(bands) = loader.bands.get(&event.entity) else { continue };
 						let Some(class) = loader.classes.get(&event.entity).copied() else { continue };
-						let Ok((entity_streaming)) = entitys.get(event.entity) else { continue };
+						let Ok((node_bounds)) = entitys.get(event.entity) else { continue };
 						changed.clear();
 						for_each_tile_in_bands(bands, event.region, |lod, min| {
 							let key = EntityTileKey::new(event.entity, class, lod, min);
