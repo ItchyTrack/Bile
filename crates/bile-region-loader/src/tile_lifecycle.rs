@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bile_math::NonZeroRegion;
 use bile_tiles::TileIndex;
 
-use crate::{coverage::Coverage, types::EntityTileKey};
+use crate::{coverage::Coverage, types::TileKey};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TileResolution {
@@ -30,9 +30,9 @@ pub(crate) struct TileEntry {
 
 #[derive(Debug, Default)]
 pub(crate) struct TileLifecycle {
-	desired: HashSet<EntityTileKey>,
-	desired_index: HashMap<Entity, TileIndex<EntityTileKey>>,
-	entries: HashMap<EntityTileKey, TileEntry>,
+	desired: HashSet<TileKey>,
+	desired_index: TileIndex<TileKey>,
+	entries: HashMap<TileKey, TileEntry>,
 	coverage: Coverage,
 }
 
@@ -41,7 +41,7 @@ impl TileLifecycle {
 	/// finalized only after every added key is registered, so an early addition cannot release a
 	/// key added later in the same batch.
 	pub(crate) fn apply_delta(
-		&mut self, added: &[EntityTileKey], removed: &[EntityTileKey], acquire: &mut Vec<EntityTileKey>, release: &mut Vec<EntityTileKey>,
+		&mut self, added: &[TileKey], removed: &[TileKey], acquire: &mut Vec<TileKey>, release: &mut Vec<TileKey>,
 	) {
 		acquire.clear();
 		release.clear();
@@ -50,7 +50,7 @@ impl TileLifecycle {
 			if !self.desired.insert(key) {
 				panic!("Dont add already desired tiles.");
 			}
-			self.desired_index.entry(key.entity).or_default().insert(key);
+			self.desired_index..insert(key);
 			if let Entry::Vacant(entry) = self.entries.entry(key) {
 				entry.insert(TileEntry { resolution: TileResolution::Requested });
 				acquire.push(key);
@@ -89,7 +89,7 @@ impl TileLifecycle {
 	}
 
 	#[must_use = "released tiles must be removed from streaming state"]
-	pub(crate) fn resolve(&mut self, key: EntityTileKey, resolved: ResolvedTile) -> Vec<EntityTileKey> {
+	pub(crate) fn resolve(&mut self, key: TileKey, resolved: ResolvedTile) -> Vec<TileKey> {
 		if !self.entries.contains_key(&key) {
 			return Vec::new();
 		}
@@ -107,11 +107,11 @@ impl TileLifecycle {
 		release
 	}
 
-	pub(crate) fn contains_desired(&self, key: EntityTileKey) -> bool { self.desired.contains(&key) }
-	pub(crate) fn contains_source(&self, key: EntityTileKey) -> bool { self.entries.contains_key(&key) }
-	pub(crate) fn entries(&self) -> impl Iterator<Item = (EntityTileKey, &TileEntry)> { self.entries.iter().map(|(&key, entry)| (key, entry)) }
+	pub(crate) fn contains_desired(&self, key: TileKey) -> bool { self.desired.contains(&key) }
+	pub(crate) fn contains_source(&self, key: TileKey) -> bool { self.entries.contains_key(&key) }
+	pub(crate) fn entries(&self) -> impl Iterator<Item = (TileKey, &TileEntry)> { self.entries.iter().map(|(&key, entry)| (key, entry)) }
 
-	pub(crate) fn desired_in_area(&self, entity: Entity, region: NonZeroRegion, out: &mut Vec<EntityTileKey>) {
+	pub(crate) fn desired_in_area(&self, entity: Entity, region: NonZeroRegion, out: &mut Vec<TileKey>) {
 		out.clear();
 		if let Some(index) = self.desired_index.get(&entity) {
 			index.for_each_overlapping(region, |key| out.push(key));
@@ -124,13 +124,13 @@ impl TileLifecycle {
 			TileResolution::Requested | TileResolution::Empty => None,
 		})
 	}
-	pub(crate) fn coverage_debug_tiles(&self) -> Vec<(EntityTileKey, bool, bool)> { self.coverage.debug_tiles() }
+	pub(crate) fn coverage_debug_tiles(&self) -> Vec<(TileKey, bool, bool)> { self.coverage.debug_tiles() }
 
-	fn replace_resolution(&mut self, key: EntityTileKey, next: TileResolution) {
+	fn replace_resolution(&mut self, key: TileKey, next: TileResolution) {
 		self.entries.get_mut(&key).unwrap().resolution = next;
 	}
 
-	fn remove_releasable(&mut self, keys: &mut Vec<EntityTileKey>) {
+	fn remove_releasable(&mut self, keys: &mut Vec<TileKey>) {
 		keys.sort_by_key(|key| {
 			let min = key.tile_key.region.min();
 			(key.entity.to_bits(), key.tile_key.lod, min.x, min.y, min.z)

@@ -1,14 +1,11 @@
-use std::collections::HashMap;
-
-use bevy::ecs::{component::Component, entity::Entity};
-use bile_math::Region;
+use bevy::prelude::*;
 
 use crate::lod_bands::LodBand;
-use crate::tile_lifecycle::{TileLifecycle, TileResolution};
+use crate::tile_lifecycle::TileLifecycle;
 
 #[derive(Component, Default, Debug)]
 pub struct RegionLoader {
-	pub(crate) regions: HashMap<Entity, Vec<LodBand>>,
+	pub(crate) regions: Vec<LodBand>,
 	pub(crate) tiles: TileLifecycle,
 }
 

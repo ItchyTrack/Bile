@@ -114,19 +114,16 @@ fn lod_bin_size(lod: u8) -> i32 {
 	1i32 << lod
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct TileMapIndexKey(TileKey);
-
-impl TileIndexKey for TileMapIndexKey {
+impl TileIndexKey for TileKey {
 	fn region(self) -> NonZeroRegion {
-		self.0.region
+		self.region
 	}
 }
 
 #[derive(Debug, Clone)]
 pub struct TileKeyMap<V> {
 	map: HashMap<TileKey, V>,
-	index: TileIndex<TileMapIndexKey>,
+	index: TileIndex<TileKey>,
 }
 
 impl<V> Default for TileKeyMap<V> {
@@ -142,24 +139,59 @@ impl<V> TileKeyMap<V> {
 	pub fn insert(&mut self, tile_key: TileKey, value: V) -> Option<V> {
 		let out = self.map.insert(tile_key, value);
 		if out.is_none() {
-			self.index.insert(TileMapIndexKey(tile_key));
+			self.index.insert(tile_key);
 		}
 		out
 	}
 	pub fn remove(&mut self, tile_key: TileKey) -> Option<V> {
 		let out = self.map.remove(&tile_key);
 		if out.is_some() {
-			self.index.remove(TileMapIndexKey(tile_key));
+			self.index.remove(tile_key);
 		}
 		out
 	}
 	pub fn get(&mut self, tile_key: TileKey) -> Option<&V> {
 		self.map.get(&tile_key)
 	}
+	pub fn contains(&self, tile_key: TileKey) -> bool {
+		self.map.contains_key(&tile_key)
+	}
 	pub fn for_each_overlapping(&self, region: NonZeroRegion, mut f: impl FnMut(TileKey)) {
-		self.index.for_each_overlapping(region, |v| f(v.0));
+		self.index.for_each_overlapping(region, |tile_key| f(tile_key));
 	}
 	pub fn keys_covering_point(&self, point: IVec3) -> Vec<TileKey> {
-		self.index.keys_covering_point(point).iter().map(|v| v.0).collect()
+		self.index.keys_covering_point(point).into_iter().map(|tile_key| tile_key).collect()
+	}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TileKeySet {
+	map: HashSet<TileKey>,
+	index: TileIndex<TileKey>,
+}
+
+impl TileKeySet {
+	pub fn insert(&mut self, tile_key: TileKey) -> bool {
+		let out = self.map.insert(tile_key);
+		if out {
+			self.index.insert(tile_key);
+		}
+		out
+	}
+	pub fn remove(&mut self, tile_key: TileKey) -> bool {
+		let out = self.map.remove(&tile_key);
+		if out {
+			self.index.remove(tile_key);
+		}
+		out
+	}
+	pub fn contains(&self, tile_key: TileKey) -> bool {
+		self.map.contains(&tile_key)
+	}
+	pub fn for_each_overlapping(&self, region: NonZeroRegion, mut f: impl FnMut(TileKey)) {
+		self.index.for_each_overlapping(region, |tile_key| f(tile_key));
+	}
+	pub fn keys_covering_point(&self, point: IVec3) -> Vec<TileKey> {
+		self.index.keys_covering_point(point).into_iter().map(|tile_key| tile_key).collect()
 	}
 }

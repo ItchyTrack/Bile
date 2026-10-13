@@ -6,7 +6,7 @@ mod tile_management;
 
 use bevy::{app::MainScheduleOrder, ecs::schedule::ScheduleLabel, prelude::*};
 pub use components::DesiredComponents;
-pub use index::{TileIndex, TileIndexKey, TileKeyMap};
+pub use index::{TileIndex, TileIndexKey, TileKeyMap, TileKeySet};
 pub use key::TileKey;
 pub use component_source::{ComponentSource, FinishedRequestMessage};
 pub use tile_management::TileInstances;

@@ -5,19 +5,19 @@ use crate::{
 	region_loader::RegionLoader,
 	lod_bands::for_each_tile_in_bands,
 	tile_lifecycle::ResolvedTile,
-	types::EntityTileKey,
+	types::TileKey,
 };
 
 fn acquire_tile(
 	requester: &mut TileRequester,
 	lifecycle: &mut crate::tile_lifecycle::TileLifecycle,
 	requester_entity: Entity,
-	key: EntityTileKey,
+	key: TileKey,
 	priority: f32,
 ) {
-	if requester.fetch_tile(key.entity, requester_entity, key.tile_key, priority, true) { return; }
+	if requester.fetch_tile(requester_entity, key.tile_key, priority, true) { return; }
 	let released = lifecycle.resolve(key, ResolvedTile::Empty);
-	for key in released { requester.release_tile(key.entity, requester_entity, key.tile_key); }
+	for key in released { requester.release_tile(key.entity, requester_entity, key); }
 }
 
 pub(crate) fn update_region_loader_requests(
@@ -35,7 +35,7 @@ pub(crate) fn update_region_loader_requests(
 			loader.classes.clear();
 			loader.tiles = Default::default();
 			let mut requester = streaming.p0();
-			for key in release { requester.release_tile(key.entity, camera_entity, key.tile_key); }
+			for key in release { requester.release_tile(key, camera_entity, key.tile_key); }
 			continue;
 		}
 		if freeze.0 { continue; }
@@ -84,7 +84,7 @@ pub(crate) fn receive_region_loader_results(
 ) {
 	for result in results.read() {
 		let Ok(mut loader) = loaders.get_mut(result.requester) else { continue };
-		let key = EntityTileKey { entity: result.entity, tile_key: result.key };
+		let key = TileKey { entity: result.entity, tile_key: result.key };
 		if !loader.tiles.contains_source(key) { continue; }
 		let resolution = match result.status {
 			TileLoadStatus::Ready(entity) => ResolvedTile::Tile(entity),
@@ -118,7 +118,7 @@ pub(crate) fn refresh_region_loader_visibility(
 						let Ok((node_bounds)) = entitys.get(event.entity) else { continue };
 						changed.clear();
 						for_each_tile_in_bands(bands, event.region, |lod, min| {
-							let key = EntityTileKey::new(event.entity, class, lod, min);
+							let key = TileKey::new(event.entity, class, lod, min);
 							if !loader.tiles.contains_desired(key) && tile_has_present_source(entity_streaming, key) { changed.push(key); }
 						});
 						loader.tiles.apply_delta(&changed, &[], &mut acquire, &mut release);

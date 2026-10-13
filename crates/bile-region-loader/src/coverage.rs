@@ -1,37 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
-use bile_math::NonZeroRegion;
-
-use crate::{types::EntityTileKey, unresolved_tile_index::UnresolvedTileIndex};
+use bile_tiles::{TileKey, TileKeySet};
 
 /// Tracks pending coverage and the loaded tiles retained until that coverage resolves.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Coverage {
-	pending: UnresolvedTileIndex,
-	replacements_by_source: HashMap<EntityTileKey, HashSet<EntityTileKey>>,
-	sources_by_replacement: HashMap<EntityTileKey, HashSet<EntityTileKey>>,
+	pending: TileKeySet,
+	replacements_by_source: HashMap<TileKey, HashSet<TileKey>>,
+	sources_by_replacement: HashMap<TileKey, HashSet<TileKey>>,
 }
 
 impl Coverage {
-	pub(crate) fn debug_tiles(&self) -> Vec<(EntityTileKey, bool, bool)> {
-		let mut roles: HashMap<EntityTileKey, (bool, bool)> = HashMap::new();
-		for key in self.pending.keys() {
-			roles.entry(key).or_default().0 = true;
-		}
-		for &key in self.replacements_by_source.keys() {
-			roles.entry(key).or_default().1 = true;
-		}
-		let mut tiles: Vec<_> = roles.into_iter().map(|(key, (pending, retained))| (key, pending, retained)).collect();
-		tiles.sort_by_key(|(key, _, _)| {
-			let min = key.tile_key.region.min();
-			(key.entity.to_bits(), key.tile_key.lod, min.x, min.y, min.z)
-		});
-		tiles
-	}
-
 	/// Registers coverage that is now wanted. If the tile was previously being retained, reverse
 	/// that handoff so its former replacements can be removed once this tile is available again.
-	pub(crate) fn set_wanted(&mut self, key: EntityTileKey) {
+	pub(crate) fn set_wanted(&mut self, key: TileKey) {
 		if self.pending.contains(key) {
 			return;
 		}
@@ -46,7 +28,7 @@ impl Coverage {
 			.replacements_by_source
 			.keys()
 			.copied()
-			.filter(|source| tiles_overlap(*source, key))
+			.filter(|source| source.region.intersects(key.region))
 			.collect();
 		for source in overlapping_sources {
 			self.add_dependency(source, key);
@@ -55,44 +37,42 @@ impl Coverage {
 
 	/// Marks wanted coverage as resolved (visible or empty) and returns retained tiles that it now safely replaces.
 	#[must_use = "tiles returned by Coverage must be removed from loader, render, and streaming state"]
-	pub(crate) fn set_resolved(&mut self, key: EntityTileKey) -> Vec<EntityTileKey> {
-		self.pending.remove(key);
-		self.apply_satisfied(key)
+	pub(crate) fn set_resolved(&mut self, tile_key: TileKey) -> Vec<TileKey> {
+		self.pending.remove(tile_key);
+		self.apply_satisfied(tile_key)
 	}
 
 	/// Removes a tile from the wanted set and returns tiles whose requests or coverage can now be
 	/// removed without opening a hole.
 	#[must_use = "tiles returned by Coverage must be removed from loader, render, and streaming state"]
-	pub(crate) fn set_unwanted(&mut self, key: EntityTileKey) -> Vec<EntityTileKey> {
-		if self.pending.remove(key) {
-			let mut removable = self.apply_satisfied(key);
-			if !self.replacements_by_source.contains_key(&key) {
-				removable.push(key);
+	pub(crate) fn set_unwanted(&mut self, tile_key: TileKey) -> Vec<TileKey> {
+		if self.pending.remove(tile_key) {
+			let mut removable = self.apply_satisfied(tile_key);
+			if !self.replacements_by_source.contains_key(&tile_key) {
+				removable.push(tile_key);
 			}
 			return self.only_unwanted(removable);
 		}
 
-		if self.replacements_by_source.contains_key(&key) {
+		if self.replacements_by_source.contains_key(&tile_key) {
 			return Vec::new();
 		}
 
 		let mut replacements = HashSet::new();
-		if let Some(region) = NonZeroRegion::new(key.tile_key.region.min(), key.tile_key.region.size()) {
-			self.pending.for_each_in_region(key.entity, region, Some(key.tile_key.lod), |candidate| {
-				replacements.insert(candidate);
-			});
-		}
+		self.pending.for_each_overlapping(tile_key.region, |candidate| {
+			if candidate.lod != tile_key.lod { replacements.insert(candidate); }
+		});
 		if replacements.is_empty() {
-			vec![key]
+			vec![tile_key]
 		} else {
 			for replacement in replacements {
-				self.add_dependency(key, replacement);
+				self.add_dependency(tile_key, replacement);
 			}
 			Vec::new()
 		}
 	}
 
-	fn add_dependency(&mut self, source: EntityTileKey, replacement: EntityTileKey) {
+	fn add_dependency(&mut self, source: TileKey, replacement: TileKey) {
 		if source == replacement {
 			return;
 		}
@@ -101,7 +81,7 @@ impl Coverage {
 		}
 	}
 
-	fn apply_satisfied(&mut self, key: EntityTileKey) -> Vec<EntityTileKey> {
+	fn apply_satisfied(&mut self, key: TileKey) -> Vec<TileKey> {
 		let mut satisfied = HashSet::from([key]);
 		let mut pending = vec![key];
 		let mut removable = Vec::new();
@@ -135,7 +115,7 @@ impl Coverage {
 		self.only_unwanted(removable)
 	}
 
-	fn detach_source(&mut self, source: EntityTileKey) -> Option<HashSet<EntityTileKey>> {
+	fn detach_source(&mut self, source: TileKey) -> Option<HashSet<TileKey>> {
 		let replacements = self.replacements_by_source.remove(&source)?;
 		for replacement in &replacements {
 			let Some(sources) = self.sources_by_replacement.get_mut(replacement) else { continue };
@@ -147,14 +127,8 @@ impl Coverage {
 		Some(replacements)
 	}
 
-	fn only_unwanted(&self, tiles: Vec<EntityTileKey>) -> Vec<EntityTileKey> {
+	fn only_unwanted(&self, tiles: Vec<TileKey>) -> Vec<TileKey> {
 		let mut seen = HashSet::new();
 		tiles.into_iter().filter(|key| !self.pending.contains(*key) && seen.insert(*key)).collect()
 	}
-}
-
-fn tiles_overlap(a: EntityTileKey, b: EntityTileKey) -> bool {
-	a.entity == b.entity
-		&& a.tile_key.region.min().cmplt(b.tile_key.region.min() + b.tile_key.region.size().as_ivec3()).all()
-		&& b.tile_key.region.min().cmplt(a.tile_key.region.min() + a.tile_key.region.size().as_ivec3()).all()
 }

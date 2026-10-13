@@ -3,13 +3,11 @@ mod coverage;
 mod lod_bands;
 mod systems;
 mod tile_lifecycle;
-mod types;
-mod unresolved_tile_index;
 
 use bevy::prelude::*;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet};
 
-pub use crate::region_loader::{RegionLoader, CoverageDebugState, CoverageDebugTile};
+pub use crate::region_loader::RegionLoader;
 
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct FreezeRegionLoader(pub bool);
