@@ -9,16 +9,12 @@ use bile_tiles::{BileTilesSchedule, BileTilesSystemSet};
 
 pub use crate::region_loader::RegionLoader;
 
-#[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct FreezeRegionLoader(pub bool);
-
 #[derive(Default)]
 pub struct RegionLoaderPlugin;
 
 impl Plugin for RegionLoaderPlugin {
 	fn build(&self, app: &mut App) {
-		app.init_resource::<FreezeRegionLoader>()
-			.add_systems(
+		app.add_systems(
 				BileTilesSchedule,
 				(
 					(

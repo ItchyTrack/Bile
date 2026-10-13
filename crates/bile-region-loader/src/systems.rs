@@ -1,78 +1,62 @@
 use bevy::{ecs::message::MessageReader, prelude::*};
+use bile_math::NonZeroRegion;
+use bile_scene::NodeBounds;
+use bile_tiles::{TileInstances, TileKey};
 
 use crate::{
-	FreezeRegionLoader,
+	lod_bands::{for_each_tile_in_bands, run_over_diff},
 	region_loader::RegionLoader,
-	lod_bands::for_each_tile_in_bands,
-	tile_lifecycle::ResolvedTile,
-	types::TileKey,
+	tile_lifecycle::ResolvedTile
 };
 
 fn acquire_tile(
-	requester: &mut TileRequester,
+	tile_instances: &mut TileInstances,
 	lifecycle: &mut crate::tile_lifecycle::TileLifecycle,
 	requester_entity: Entity,
 	key: TileKey,
 	priority: f32,
 ) {
-	if requester.fetch_tile(requester_entity, key.tile_key, priority, true) { return; }
+	if tile_instances.fetch_tile(requester_entity, key.tile_key, priority, true) { return; }
 	let released = lifecycle.resolve(key, ResolvedTile::Empty);
-	for key in released { requester.release_tile(key.entity, requester_entity, key); }
+	for key in released { tile_instances.release_tile(key.entity, requester_entity, key); }
 }
 
 pub(crate) fn update_region_loader_requests(
-	freeze: Res<FreezeRegionLoader>,
-	mut cameras: Query<(Entity, &GlobalTransform, &mut RegionLoader)>,
-	mut streaming: ParamSet<(
-		TileRequester,
-		Query<(Entity, &GlobalTransform, &EntityStreaming)>,
-	)>,
+	mut loaders: Query<(&mut RegionLoader, &mut TileInstances, &NodeBounds)>,
 ) {
-	for (camera_entity, camera, camera_global, tile_class, mut loader) in &mut cameras {
-		if !camera.is_active {
-			let release: Vec<_> = loader.tiles.entries().map(|(key, _)| key).collect();
-			loader.bands.clear();
-			loader.classes.clear();
-			loader.tiles = Default::default();
-			let mut requester = streaming.p0();
-			for key in release { requester.release_tile(key, camera_entity, key.tile_key); }
-			continue;
-		}
-		if freeze.0 { continue; }
+	for (mut region_loader, mut tile_instances, node_bounds) in &mut loaders {
+		if region_loader.class == region_loader.new_class {
+			let Some(new_regions) = region_loader.new_regions.take() else { continue; };
 
-		let camera_world = camera_global.translation();
-		let settings = loader.settings.clone();
-		let mut acquisitions = Vec::new();
-		let mut releases = Vec::new();
-		{
-			let entitys = streaming.p1();
-			let mut acquire = Vec::new();
-			let mut release = Vec::new();
-			for (entity_id, entity_global, entity_streaming) in &entitys {
-				let camera_local = entity_global.affine().inverse().transform_point3(camera_world);
-				let delta = update_desired_sources_delta(
-					&mut loader,
-					entity_id,
-					tile_class.0,
-					nearest_chunk_center(camera_local),
-					&settings,
-					entity_streaming,
-				);
-				loader.tiles.apply_delta(&delta.added, &delta.removed, &mut acquire, &mut release);
-				releases.extend(release.drain(..));
-				for key in acquire.drain(..) {
-					let center_local = ((key.tile_key.region.min() + key.tile_key.region.size().as_ivec3() / 2) * CHUNK_SIZE as i32).as_vec3();
-					let priority = -camera_world.distance(entity_global.transform_point(center_local));
-					acquisitions.push((key, priority));
-				}
+			if let Some(class) = region_loader.class {
+				run_over_diff(&region_loader.regions, &new_regions, node_bounds, |lod, min, is_added| {
+					let tile_key = TileKey { region: NonZeroRegion::new(min, UVec3::splat(2u32.pow(lod as u32))).unwrap(), lod };
+					if is_added {
+						tile_instances.add_class(tile_key, class);
+					} else {
+						tile_instances.remove_class(tile_key, class);
+					}
+				});
 			}
-		}
 
-		let mut requester = streaming.p0();
-		for key in releases { requester.release_tile(key.entity, camera_entity, key.tile_key); }
-		for (key, priority) in acquisitions {
-			if !loader.tiles.contains_source(key) { continue; }
-			acquire_tile(&mut requester, &mut loader.tiles, camera_entity, key, priority);
+			region_loader.regions = new_regions;
+		} else {
+			let new_class = region_loader.new_class.take();
+			let new_regions = region_loader.new_regions.take().unwrap_or_else(|| region_loader.regions.clone());
+
+			if let Some(old_class) = region_loader.class {
+				run_over_diff(&region_loader.regions, &[], node_bounds, |lod, min, _| {
+					tile_instances.remove_class(TileKey { region: NonZeroRegion::new(min, UVec3::splat(2u32.pow(lod as u32))).unwrap(), lod }, old_class);
+				});
+			}
+			if let Some(new_class) = new_class {
+				run_over_diff(&[], &new_regions, node_bounds, |lod, min, _| {
+					tile_instances.add_class(TileKey { region: NonZeroRegion::new(min, UVec3::splat(2u32.pow(lod as u32))).unwrap(), lod }, new_class);
+				});
+			}
+
+			region_loader.regions = new_regions;
+			region_loader.class = new_class;
 		}
 	}
 }
@@ -127,7 +111,7 @@ pub(crate) fn refresh_region_loader_visibility(
 					}
 					ChunkAvailabilityChangeKind::BecameEmpty => {
 						let Ok((entity_streaming, _)) = entitys.get(event.entity) else { continue };
-						loader.tiles.desired_in_area(event.entity, event.region, &mut changed);
+						loader.tiles.desired_in_area(event.region, &mut changed);
 						changed.retain(|&key| !tile_has_present_source(entity_streaming, key));
 						loader.tiles.apply_delta(&[], &changed, &mut acquire, &mut release);
 						releases.extend(release.drain(..));

@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bile_math::{Region, NonZeroRegion};
+use bile_scene::NodeBounds;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct LodBand {
@@ -50,7 +51,7 @@ fn is_tile_in_band(band: LodBand, min: IVec3) -> bool {
 pub(crate) fn run_over_diff(
 	old_bands: &[LodBand],
 	new_bands: &[LodBand],
-	streaming: &EntityStreaming,
+	node_bounds: &NodeBounds,
 	mut f: impl FnMut(u8, IVec3, bool),
 ) {
 	let Some(max_lod) = old_bands.iter().chain(new_bands.iter()).map(|band| band.lod).max() else { return };
@@ -60,11 +61,11 @@ pub(crate) fn run_over_diff(
 		let (new_outer, new_inner) = band_boxes(new_bands, lod);
 		if new_outer == old_outer && new_inner == old_inner { continue; }
 		let size = 1u32 << lod;
-		emit_minus_minus(new_outer, old_outer, new_inner, lod, size, true, streaming, &mut f);
-		emit_minus(intersection(new_outer, old_inner), new_inner, lod, size, true, streaming, &mut f);
+		emit_minus_minus(new_outer, old_outer, new_inner, lod, size, true, node_bounds, &mut f);
+		emit_minus(intersection(new_outer, old_inner), new_inner, lod, size, true, node_bounds, &mut f);
 
-		emit_minus_minus(old_outer, new_outer, old_inner, lod, size, false, streaming, &mut f);
-		emit_minus(intersection(old_outer, new_inner), old_inner, lod, size, false, streaming, &mut f);
+		emit_minus_minus(old_outer, new_outer, old_inner, lod, size, false, node_bounds, &mut f);
+		emit_minus(intersection(old_outer, new_inner), old_inner, lod, size, false, node_bounds, &mut f);
 	}
 }
 
@@ -83,9 +84,9 @@ fn band_boxes(bands: &[LodBand], lod: u8) -> (Region, Region) {
 	}
 }
 
-fn emit_minus<F: FnMut(u8, IVec3, bool)>(region: Region, cut: Region, lod: u8, size: u32, added: bool, streaming: &EntityStreaming, f: &mut F) {
+fn emit_minus<F: FnMut(u8, IVec3, bool)>(region: Region, cut: Region, lod: u8, size: u32, added: bool, node_bounds: &NodeBounds, f: &mut F) {
 	for slab in region_minus_region(region, cut) {
-		emit_region(slab, lod, size, added, streaming, f);
+		emit_region(slab, lod, size, added, node_bounds, f);
 	}
 }
 
@@ -96,12 +97,12 @@ fn emit_minus_minus<F: FnMut(u8, IVec3, bool)>(
 	lod: u8,
 	size: u32,
 	added: bool,
-	streaming: &EntityStreaming,
+	node_bounds: &NodeBounds,
 	f: &mut F,
 ) {
 	for slab in region_minus_region(region, cut_a) {
 		for piece in region_minus_region(slab, cut_b) {
-			emit_region(piece, lod, size, added, streaming, f);
+			emit_region(piece, lod, size, added, node_bounds, f);
 		}
 	}
 }
@@ -123,13 +124,7 @@ fn region_minus_region(a: Region, b: Region) -> [Region; 6] {
 	]
 }
 
-fn emit_region<F: FnMut(u8, IVec3, bool)>(region: Region, lod: u8, size: u32, added: bool, streaming: &EntityStreaming, f: &mut F) {
-	if region.is_empty() {
-		return;
-	}
-	streaming.presence().for_each_occupied_tile_cover(
-		NonZeroRegion::try_from(region).unwrap(),
-		size,
-		|tile_min| f(lod, tile_min, added),
-	);
+fn emit_region<F: FnMut(u8, IVec3, bool)>(region: Region, lod: u8, size: u32, added: bool, node_bounds: &NodeBounds, f: &mut F) {
+	let Ok(region) = region.try_into() else { return; };
+	node_bounds.repeat_over_area(region, UVec3::splat(size), IVec3::ZERO, |tile_min| f(lod, tile_min, added));
 }

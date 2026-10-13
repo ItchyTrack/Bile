@@ -2,9 +2,9 @@ use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use bevy::prelude::*;
 use bile_math::NonZeroRegion;
-use bile_tiles::TileIndex;
+use bile_tiles::{TileIndex, TileKey};
 
-use crate::{coverage::Coverage, types::TileKey};
+use crate::coverage::Coverage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TileResolution {
@@ -50,7 +50,7 @@ impl TileLifecycle {
 			if !self.desired.insert(key) {
 				panic!("Dont add already desired tiles.");
 			}
-			self.desired_index..insert(key);
+			self.desired_index.insert(key);
 			if let Entry::Vacant(entry) = self.entries.entry(key) {
 				entry.insert(TileEntry { resolution: TileResolution::Requested });
 				acquire.push(key);
@@ -72,12 +72,7 @@ impl TileLifecycle {
 			if !self.desired.remove(&key) {
 				continue;
 			}
-			if let Some(index) = self.desired_index.get_mut(&key.entity) {
-				index.remove(key);
-				if index.is_empty() {
-					self.desired_index.remove(&key.entity);
-				}
-			}
+			self.desired_index.remove(key);
 			if !self.entries.contains_key(&key) {
 				continue;
 			}
@@ -111,11 +106,9 @@ impl TileLifecycle {
 	pub(crate) fn contains_source(&self, key: TileKey) -> bool { self.entries.contains_key(&key) }
 	pub(crate) fn entries(&self) -> impl Iterator<Item = (TileKey, &TileEntry)> { self.entries.iter().map(|(&key, entry)| (key, entry)) }
 
-	pub(crate) fn desired_in_area(&self, entity: Entity, region: NonZeroRegion, out: &mut Vec<TileKey>) {
+	pub(crate) fn desired_in_area(&self, region: NonZeroRegion, out: &mut Vec<TileKey>) {
 		out.clear();
-		if let Some(index) = self.desired_index.get(&entity) {
-			index.for_each_overlapping(region, |key| out.push(key));
-		}
+		self.desired_index.for_each_overlapping(region, |key| out.push(key));
 	}
 
 	pub(crate) fn tiles_to_render(&self) -> impl Iterator<Item = Entity> + '_ {
@@ -124,19 +117,18 @@ impl TileLifecycle {
 			TileResolution::Requested | TileResolution::Empty => None,
 		})
 	}
-	pub(crate) fn coverage_debug_tiles(&self) -> Vec<(TileKey, bool, bool)> { self.coverage.debug_tiles() }
 
 	fn replace_resolution(&mut self, key: TileKey, next: TileResolution) {
 		self.entries.get_mut(&key).unwrap().resolution = next;
 	}
 
-	fn remove_releasable(&mut self, keys: &mut Vec<TileKey>) {
-		keys.sort_by_key(|key| {
-			let min = key.tile_key.region.min();
-			(key.entity.to_bits(), key.tile_key.lod, min.x, min.y, min.z)
+	fn remove_releasable(&mut self, tile_keys: &mut Vec<TileKey>) {
+		tile_keys.sort_by_key(|tile_key| {
+			let min = tile_key.region.min();
+			(tile_key.lod, min.x, min.y, min.z)
 		});
-		keys.dedup();
-		keys.retain(|key| {
+		tile_keys.dedup();
+		tile_keys.retain(|key| {
 			if self.desired.contains(key) {
 				return false;
 			}
