@@ -12,7 +12,7 @@ use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, ComponentSource, Desired
 use crossbeam_channel::{Receiver, Sender};
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
-use crate::terrain::{TerrainClass, TerrainMeshSource};
+use crate::terrain::TerrainClass;
 
 const TERRAIN_AMPLITUDE: f32 = 160.0;
 const BLADES_PER_TILE: u32 = 6000;
@@ -32,7 +32,7 @@ struct GrassMeshResult {
 	mesh: Option<Mesh>,
 }
 
-#[derive(Component)]
+#[derive(Resource)]
 pub struct GrassSource {
 	noise: Arc<FastNoiseLite>,
 	grass: ComponentId,
@@ -118,10 +118,6 @@ fn build_grass_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
 	Some(mesh)
 }
 
-fn add_grass_source(add: On<Add, TerrainMeshSource>, grass: ComponentIdFor<Grass>, mut commands: Commands) {
-	commands.entity(add.entity).insert(GrassSource::new(grass.get()));
-}
-
 fn decide_grass_components(
 	terrain_class: ComponentIdFor<TerrainClass>,
 	grass: ComponentIdFor<Grass>,
@@ -136,31 +132,29 @@ fn decide_grass_components(
 
 fn receive_grass_meshes(
 	mut commands: Commands,
-	sources: Query<&GrassSource>,
+	source: Res<GrassSource>,
 	tiles: Query<&DesiredComponents>,
 	material: Res<GrassMaterial>,
 	mut meshes: ResMut<Assets<Mesh>>,
 	mut finished: MessageWriter<FinishedRequestMessage>,
 ) {
-	for source in &sources {
-		for result in source.receiver.try_iter() {
-			let Ok(desired_components) = tiles.get(result.tile_entity) else { continue };
-			if !desired_components.is_component_desired(source.grass) { continue; }
-			if let Some(mesh) = result.mesh {
-				commands.entity(result.tile_entity).try_insert((Transform::default(), Visibility::default()));
-				commands.spawn((
-					Mesh3d(meshes.add(mesh)),
-					MeshMaterial3d(material.0.clone()),
-					ChildOf(result.tile_entity),
-				));
-			}
-			finished.write(FinishedRequestMessage {
-				entity: result.entity,
-				tile_entity: result.tile_entity,
-				tile_key: result.tile_key,
-				component_id: source.grass,
-			});
+	for result in source.receiver.try_iter() {
+		let Ok(desired_components) = tiles.get(result.tile_entity) else { continue };
+		if !desired_components.is_component_desired(source.grass) { continue; }
+		if let Some(mesh) = result.mesh {
+			commands.entity(result.tile_entity).try_insert((Transform::default(), Visibility::default()));
+			commands.spawn((
+				Mesh3d(meshes.add(mesh)),
+				MeshMaterial3d(material.0.clone()),
+				ChildOf(result.tile_entity),
+			));
 		}
+		finished.write(FinishedRequestMessage {
+			entity: result.entity,
+			tile_entity: result.tile_entity,
+			tile_key: result.tile_key,
+			component_id: source.grass,
+		});
 	}
 }
 
@@ -173,9 +167,9 @@ pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
 	fn build(&self, app: &mut App) {
-		app.world_mut().register_component::<Grass>();
+		let grass = app.world_mut().register_component::<Grass>();
 		app.register_component_as::<dyn ComponentSource, GrassSource>()
-			.add_observer(add_grass_source)
+			.insert_resource(GrassSource::new(grass))
 			.add_systems(Startup, setup_grass_material)
 			.add_systems(Update, receive_grass_meshes)
 			.add_systems(BileTilesSchedule, decide_grass_components.in_set(BileTilesSystemSet::UpdateWantedComponents));

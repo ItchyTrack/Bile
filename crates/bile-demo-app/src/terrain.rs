@@ -45,7 +45,7 @@ struct TerrainMeshResult {
 	mesh: Option<Mesh>,
 }
 
-#[derive(Component)]
+#[derive(Resource)]
 pub struct TerrainMeshSource {
 	noise: Arc<FastNoiseLite>,
 	mesh3d: ComponentId,
@@ -137,29 +137,27 @@ fn build_tile_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
 
 fn receive_terrain_meshes(
 	mut commands: Commands,
-	sources: Query<&TerrainMeshSource>,
+	source: Res<TerrainMeshSource>,
 	tiles: Query<&DesiredComponents>,
 	materials: Res<TerrainMaterials>,
 	mut meshes: ResMut<Assets<Mesh>>,
 	mut finished: MessageWriter<FinishedRequestMessage>,
 ) {
-	for source in &sources {
-		for result in source.receiver.try_iter() {
-			let Ok(desired_components) = tiles.get(result.tile_entity) else { continue };
-			if !desired_components.is_component_desired(source.mesh3d) { continue; }
-			if let Some(mesh) = result.mesh {
-				commands.entity(result.tile_entity).try_insert((
-					Mesh3d(meshes.add(mesh)),
-					MeshMaterial3d(materials.for_lod(result.tile_key.lod)),
-				));
-			}
-			finished.write(FinishedRequestMessage {
-				entity: result.entity,
-				tile_entity: result.tile_entity,
-				tile_key: result.tile_key,
-				component_id: source.mesh3d,
-			});
+	for result in source.receiver.try_iter() {
+		let Ok(desired_components) = tiles.get(result.tile_entity) else { continue };
+		if !desired_components.is_component_desired(source.mesh3d) { continue; }
+		if let Some(mesh) = result.mesh {
+			commands.entity(result.tile_entity).try_insert((
+				Mesh3d(meshes.add(mesh)),
+				MeshMaterial3d(materials.for_lod(result.tile_key.lod)),
+			));
 		}
+		finished.write(FinishedRequestMessage {
+			entity: result.entity,
+			tile_entity: result.tile_entity,
+			tile_key: result.tile_key,
+			component_id: source.mesh3d,
+		});
 	}
 }
 
@@ -175,7 +173,6 @@ fn decide_terrain_components(
 
 fn spawn_terrain(
 	mut commands: Commands,
-	mesh3d: ComponentIdFor<Mesh3d>,
 	mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
 	let lod_materials = (0..8)
@@ -192,7 +189,6 @@ fn spawn_terrain(
 		Transform::default(),
 		Visibility::default(),
 		NodeBounds::new(bounds),
-		TerrainMeshSource::new(mesh3d.get()),
 		MainRenderingLoader::new(TILE_SIZE),
 	));
 }
@@ -202,8 +198,10 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
 	fn build(&self, app: &mut App) {
 		app.world_mut().register_component::<TerrainClass>();
+		let mesh3d = app.world_mut().register_component::<Mesh3d>();
 		app.register_tile_class::<TerrainClass>()
 			.register_component_as::<dyn ComponentSource, TerrainMeshSource>()
+			.insert_resource(TerrainMeshSource::new(mesh3d))
 			.add_systems(Startup, spawn_terrain)
 			.add_systems(Update, receive_terrain_meshes)
 			.add_systems(BileTilesSchedule, decide_terrain_components.in_set(BileTilesSystemSet::UpdateWantedComponents));
