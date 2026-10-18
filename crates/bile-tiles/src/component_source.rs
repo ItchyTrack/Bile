@@ -16,3 +16,11 @@ pub struct FinishedRequestMessage {
 	pub tile_key: TileKey,
 	pub component_id: ComponentId,
 }
+
+#[derive(Debug, Clone, Copy, Message)]
+pub struct CancelRequestMessage {
+	pub entity: Entity,
+	pub tile_entity: Entity,
+	pub tile_key: TileKey,
+	pub component_id: ComponentId,
+}
