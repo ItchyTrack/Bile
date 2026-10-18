@@ -7,7 +7,6 @@ use bile_region_loader::{RegionLoaderComponent, RegionLoaderPlugin};
 mod lod_camera;
 mod terrain;
 
-/// Marker for the loader that decides what is rendered.
 pub struct MainRendering;
 pub type MainRenderingLoader = RegionLoaderComponent<MainRendering>;
 
@@ -19,6 +18,7 @@ fn main() {
 		.add_plugins(RegionLoaderPlugin::<MainRendering>::default())
 		.add_plugins((terrain::TerrainPlugin, lod_camera::LodCameraPlugin))
 		.insert_resource(ClearColor(Color::srgb(0.6, 0.75, 0.9)))
+		.insert_resource(GlobalAmbientLight { brightness: 400.0, ..default() })
 		.add_systems(Startup, scene.spawn())
 		.run();
 }

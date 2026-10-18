@@ -4,8 +4,6 @@ use bile_scene::NodeBounds;
 
 use crate::TileClassKey;
 
-/// Tiles of `lod` with `class` covering `outer` minus `inner`. Both boxes should be aligned to the
-/// tile size of `lod`. A loader can have at most one band per class and lod.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LodBand {
 	pub class: ComponentId,
@@ -14,7 +12,6 @@ pub struct LodBand {
 	pub inner: Option<Region>,
 }
 
-/// Runs `f(key)` for every tile that lies within a band and overlaps both `area_region` and the node bounds.
 pub(crate) fn for_each_tile_in_bands(
 	bands: &[LodBand],
 	tile_size: u32,
@@ -55,7 +52,6 @@ fn is_tile_in_band(band: LodBand, key: TileClassKey) -> bool {
 	band.outer.contains_region(region) && band.inner.is_none_or(|inner| !inner.contains_region(region))
 }
 
-/// Runs `f(key, is_added)` for every tile that is in `new_bands` but not `old_bands` and the reverse.
 pub(crate) fn run_over_diff(
 	old_bands: &[LodBand],
 	new_bands: &[LodBand],
@@ -93,7 +89,6 @@ pub(crate) fn run_over_diff(
 	}
 }
 
-/// If any class has more than one band for the same lod.
 pub(crate) fn has_duplicate_bands(bands: &[LodBand]) -> bool {
 	bands.iter().enumerate().any(|(i, a)| bands[..i].iter().any(|b| a.class == b.class && a.lod == b.lod))
 }

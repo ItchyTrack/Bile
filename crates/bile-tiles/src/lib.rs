@@ -16,13 +16,9 @@ pub struct BileTilesSchedule;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BileTilesSystemSet {
-	/// Finished component requests are applied and [`TileClassReady`] messages are sent.
 	UpdateReadyClasses,
-	/// Requesters add and remove classes on [`TileInstances`].
 	UpdateWantedClasses,
 	ClassRequest,
-	/// Systems that decide which components a class needs (usually by querying `Added<Class>`)
-	/// should call [`DesiredComponents::add_desired_component`] here.
 	UpdateWantedComponents,
 	ComponentRequest,
 }

@@ -61,7 +61,6 @@ impl Coverage {
 		}
 
 		let mut replacements = HashSet::new();
-		// Any overlapping pending tile replaces this one, including the same tile with a different class.
 		self.pending.for_each_overlapping(tile_key.tile_key.region, |candidate| {
 			if candidate != tile_key { replacements.insert(candidate); }
 		});

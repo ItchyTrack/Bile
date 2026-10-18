@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 use bile_math::NonZeroRegion;
 
-/// The area of a node that has data. Tiles are only requested where they overlap these bounds.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeBounds {
 	region: NonZeroRegion,
@@ -16,8 +15,6 @@ impl NodeBounds {
 		self.region
 	}
 
-	/// Changing the bounds does not update existing requests by itself. Send a region updated
-	/// message covering the changed area so loaders can request or release tiles in it.
 	pub fn set_region(&mut self, region: NonZeroRegion) {
 		self.region = region;
 	}

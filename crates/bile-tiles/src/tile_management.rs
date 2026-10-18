@@ -6,13 +6,9 @@ use bile_math::NonZeroRegion;
 
 use crate::{DesiredComponents, TileClassReady, TileKey, TileKeyMap};
 
-/// Owns the tiles of a node. Tiles are spawned as children of this entity when a class is first
-/// added to them and despawned once no classes remain. Classes must be zero sized marker components.
 #[derive(Component, Default, Debug)]
 pub struct TileInstances {
 	tile_class_additions: HashMap<TileKey, HashMap<ComponentId, i32>>,
-	// Every add since the last update, even ones canceled by a removal. Requesters re-adding a
-	// class that is already loaded still need to be told it is ready.
 	added_classes: Vec<(TileKey, ComponentId)>,
 	key_to_entity: TileKeyMap<Entity>,
 }
@@ -90,7 +86,6 @@ pub fn modify_tile_classes(
 				for (class, delta) in class_additions {
 					if desired_component.update_class(class, delta) {
 						if delta > 0 {
-							// SAFETY: classes are zero sized marker components.
 							unsafe { entity_commands.insert_by_id(class, ()); }
 						} else {
 							desired_component.remove_class_components(class);
@@ -111,7 +106,6 @@ pub fn modify_tile_classes(
 
 				let mut entity_commands = commands.spawn((tile_key, ChildOf(instances_entity)));
 				for component_id in desired_component.get_classes().keys() {
-					// SAFETY: classes are zero sized marker components.
 					unsafe { entity_commands.insert_by_id(*component_id, ()); }
 				}
 				entity_commands.insert(desired_component);
@@ -119,7 +113,6 @@ pub fn modify_tile_classes(
 			}
 		}
 
-		// Classes that were already loaded will not become ready again, so tell the new requester now.
 		for (tile_key, class) in std::mem::take(&mut tile_instance.added_classes) {
 			let Some(entity) = tile_instance.get(tile_key) else { continue };
 			let Ok(desired_component) = desired_components.get(entity) else { continue };

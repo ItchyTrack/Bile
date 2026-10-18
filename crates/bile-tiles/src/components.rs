@@ -4,12 +4,8 @@ use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*};
 
 use crate::{TileKey, component_source::{ComponentSource, FinishedRequestMessage}};
 
-/// Sent when every component desired by a class on a tile has finished its request. A class that
-/// desires no components is ready as soon as the systems in [`crate::BileTilesSystemSet::UpdateWantedComponents`] have run.
-/// Also resent when a class that is already ready is requested again on the same tile.
 #[derive(Debug, Clone, Copy, Message)]
 pub struct TileClassReady {
-	/// The entity with the [`crate::TileInstances`] that owns the tile.
 	pub entity: Entity,
 	pub tile_entity: Entity,
 	pub tile_key: TileKey,
@@ -65,11 +61,9 @@ impl DesiredComponents {
 	pub fn has_class(&self, class_id: ComponentId) -> bool {
 		self.classes.contains_key(&class_id)
 	}
-	/// If the class was ready the last time readiness was checked.
 	pub fn is_class_ready(&self, class_id: ComponentId) -> bool {
 		self.ready_classes.contains(&class_id)
 	}
-	// Called once per class when the last want for it is removed from the tile.
 	fn release_component(&mut self, component_id: ComponentId) {
 		let desired_count = self.components.get_mut(&component_id).expect("If it was in components_by_class then its is components");
 		if *desired_count == 1 {
@@ -125,7 +119,6 @@ impl DesiredComponents {
 			.get(&class_id)
 			.is_none_or(|components| components.keys().all(|component_id| self.finished_components.contains(component_id)))
 	}
-	// Pushes classes that became ready since the last call.
 	fn update_ready_classes(&mut self, newly_ready: &mut Vec<ComponentId>) {
 		let ready: Vec<_> = self.classes.keys().copied().filter(|&class_id| self.class_ready(class_id)).collect();
 		self.ready_classes.retain(|class_id| ready.contains(class_id));
@@ -175,7 +168,6 @@ pub(crate) fn request_newly_desired(
 			continue;
 		}
 		for component_id in desired_components_manager.newly_desired_components.drain() {
-			// Pick the cheapest source that can provide the component.
 			let mut best: Option<(Entity, usize, f32)> = None;
 			for (source_entity, sources) in component_sources.iter_mut() {
 				for (index, source) in sources.iter().enumerate() {
@@ -213,7 +205,6 @@ pub(crate) fn update_ready_classes(
 
 	let mut newly_ready = Vec::new();
 	for (tile_entity, mut desired_components, &tile_key, child_of) in &mut tiles.p1() {
-		// Readiness is cached state, so updating it should not count as a change.
 		desired_components.bypass_change_detection().update_ready_classes(&mut newly_ready);
 		for class in newly_ready.drain(..) {
 			ready_messages.write(TileClassReady { entity: child_of.parent(), tile_entity, tile_key, class });

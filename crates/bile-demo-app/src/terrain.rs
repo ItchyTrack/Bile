@@ -16,15 +16,12 @@ use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
 use crate::MainRenderingLoader;
 
-/// Size of a lod 0 tile in bevy units.
 pub const TILE_SIZE: u32 = 64;
-/// Quads along each side of a tile mesh, at every lod.
 const TILE_QUADS: usize = 32;
 const TERRAIN_AMPLITUDE: f32 = 160.0;
 const TERRAIN_HALF_WIDTH: i32 = 32768;
 const TERRAIN_HALF_HEIGHT: i32 = 256;
 
-/// The class the demo's loader puts on terrain tiles.
 #[derive(Component, Default)]
 pub struct TerrainClass;
 
@@ -48,7 +45,6 @@ struct TerrainMeshResult {
 	mesh: Option<Mesh>,
 }
 
-/// Builds heightmap meshes for terrain tiles on background threads.
 #[derive(Component)]
 pub struct TerrainMeshSource {
 	noise: Arc<FastNoiseLite>,
@@ -89,14 +85,10 @@ fn terrain_height(noise: &FastNoiseLite, x: f32, z: f32) -> f32 {
 	noise.get_noise_2d(x, z) * TERRAIN_AMPLITUDE
 }
 
-/// Builds the part of the heightmap inside the tile. Each quad belongs to the tile its average
-/// height falls in, so vertically stacked tiles do not overlap. Returns `None` if the surface
-/// does not pass through the tile.
 fn build_tile_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
 	let min = tile_key.region.min();
 	let size = tile_key.region.size().x as f32;
 	let step = size / TILE_QUADS as f32;
-	// One extra sample on every side for normals.
 	let samples = TILE_QUADS + 3;
 	let mut heights = Vec::with_capacity(samples * samples);
 	for j in 0..samples {
@@ -153,7 +145,6 @@ fn receive_terrain_meshes(
 ) {
 	for source in &sources {
 		for result in source.receiver.try_iter() {
-			// The tile may have been released while its mesh was being built.
 			let Ok(desired_components) = tiles.get(result.tile_entity) else { continue };
 			if !desired_components.is_component_desired(source.mesh3d) { continue; }
 			if let Some(mesh) = result.mesh {
@@ -172,7 +163,6 @@ fn receive_terrain_meshes(
 	}
 }
 
-/// Decides how terrain tiles are shown: every tile with [`TerrainClass`] wants a mesh.
 fn decide_terrain_components(
 	terrain_class: ComponentIdFor<TerrainClass>,
 	mesh3d: ComponentIdFor<Mesh3d>,

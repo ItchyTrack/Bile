@@ -16,7 +16,6 @@ impl TileResolution {
 	pub(crate) fn is_requested(&self) -> bool { matches!(self, Self::Requested) }
 }
 
-/// The desired tiles of a loader, plus loaded tiles that are kept until the tiles replacing them are loaded.
 #[derive(Debug, Default)]
 pub(crate) struct TileLifecycle {
 	desired: HashSet<TileClassKey>,
@@ -72,7 +71,6 @@ impl TileLifecycle {
 		self.remove_releasable(release);
 	}
 
-	/// Marks a requested tile as loaded. Returns tiles that are no longer needed to cover it.
 	#[must_use = "released tiles must have their class removed"]
 	pub(crate) fn resolve(&mut self, key: TileClassKey, tile_entity: Entity) -> Vec<TileClassKey> {
 		let Some(resolution) = self.entries.get_mut(&key) else { return Vec::new() };

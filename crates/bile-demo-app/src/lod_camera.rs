@@ -1,6 +1,3 @@
-//! Sets the regions of every [`MainRenderingLoader`] to lod bands around the [`LodCamera`], the
-//! same way VGE's camera voxel loader does, and draws them.
-
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*};
 use bile_math::Region;
 use bile_region_loader::LodBand;
@@ -11,9 +8,7 @@ use crate::{MainRenderingLoader, terrain::{TerrainClass, lod_color}};
 #[derive(Resource, Debug, Clone)]
 pub struct LodCameraSettings {
 	pub max_lod: u8,
-	/// Radius of the lod 0 box in lod 0 tiles.
 	pub near_radius_tiles: u32,
-	/// How many tiles of each lod surround the previous lod.
 	pub rings_per_lod: u32,
 	pub frozen: bool,
 	pub show_regions: bool,
@@ -26,18 +21,13 @@ impl Default for LodCameraSettings {
 	}
 }
 
-/// The camera loaders build their bands around.
 #[derive(Component, Default, Clone)]
 pub struct LodCamera;
 
 #[derive(Component)]
 struct LodCameraText;
 
-/// Concentric bands around `position`. Lod 0 covers a box of `near_radius_tiles` around the
-/// nearest tile corner and each further lod adds `rings_per_lod` of its own tiles around the last.
-/// Every band but the last is aligned to the next lod's tiles so the next band's inner box is too.
 pub fn lod_bands_around(position: Vec3, tile_size: u32, class: ComponentId, settings: &LodCameraSettings) -> Vec<LodBand> {
-	// Positions here are in lod 0 tiles.
 	let center = (position / tile_size as f32).round().as_ivec3();
 	let radius = settings.near_radius_tiles as i32;
 	let to_region = |(min, max): (IVec3, IVec3)| Region::from_min_end(min * tile_size as i32, max * tile_size as i32).unwrap();
@@ -90,7 +80,6 @@ fn draw_regions(
 	for (transform, node_bounds, loader) in &loaders {
 		if settings.show_regions {
 			for band in loader.regions() {
-				// Only the part of a band with data is interesting.
 				let Some(region) = node_bounds.region().intersection(band.outer) else { continue };
 				gizmos.cube(*transform * region_transform(region.into()), lod_color(band.lod));
 			}
