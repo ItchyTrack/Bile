@@ -2,72 +2,100 @@ use bevy::{ecs::component::ComponentId, prelude::*};
 use bile_math::{Region, NonZeroRegion};
 use bile_scene::NodeBounds;
 
+use crate::TileClassKey;
+
+/// Tiles of `lod` with `class` covering `outer` minus `inner`. Both boxes should be aligned to the
+/// tile size of `lod`. A loader can have at most one band per class and lod.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct LodBand {
-	pub(crate) class: ComponentId,
-	pub(crate) lod: u8,
-	pub(crate) outer: Region,
-	pub(crate) inner: Option<Region>,
+pub struct LodBand {
+	pub class: ComponentId,
+	pub lod: u8,
+	pub outer: Region,
+	pub inner: Option<Region>,
 }
 
-/// Runs `f(lod, tile_min)` for every tile that lies within a band and overlaps the area
-/// `[area_min, area_min + area_size)`.
-pub(crate) fn for_each_tile_in_bands(bands: &[LodBand], area_region: NonZeroRegion, mut f: impl FnMut(u8, IVec3)) {
+/// Runs `f(key)` for every tile that lies within a band and overlaps both `area_region` and the node bounds.
+pub(crate) fn for_each_tile_in_bands(
+	bands: &[LodBand],
+	tile_size: u32,
+	area_region: NonZeroRegion,
+	node_bounds: &NodeBounds,
+	mut f: impl FnMut(TileClassKey),
+) {
 	let area_min = area_region.min();
 	let area_max = area_region.end();
 	for band in bands {
-		let tile_size = 1i32 << band.lod;
+		let band_tile_size = (tile_size << band.lod) as i32;
 		let overlap_min = area_min.max(band.outer.min());
 		let overlap_max = area_max.min(band.outer.end());
 		if overlap_min.cmpge(overlap_max).any() {
 			continue;
 		}
-		let mut x = overlap_min.x.div_euclid(tile_size) * tile_size;
+		let mut x = overlap_min.x.div_euclid(band_tile_size) * band_tile_size;
 		while x < overlap_max.x {
-			let mut y = overlap_min.y.div_euclid(tile_size) * tile_size;
+			let mut y = overlap_min.y.div_euclid(band_tile_size) * band_tile_size;
 			while y < overlap_max.y {
-				let mut z = overlap_min.z.div_euclid(tile_size) * tile_size;
+				let mut z = overlap_min.z.div_euclid(band_tile_size) * band_tile_size;
 				while z < overlap_max.z {
-					let tile_min = IVec3::new(x, y, z);
-					if is_tile_in_band(*band, tile_min) {
-						f(band.lod, tile_min);
+					let key = TileClassKey::new(tile_size, band.class, band.lod, IVec3::new(x, y, z));
+					if is_tile_in_band(*band, key) && node_bounds.overlapping(key.tile_key.region) {
+						f(key);
 					}
-					z += tile_size;
+					z += band_tile_size;
 				}
-				y += tile_size;
+				y += band_tile_size;
 			}
-			x += tile_size;
+			x += band_tile_size;
 		}
 	}
 }
 
-fn is_tile_in_band(band: LodBand, min: IVec3) -> bool {
-	let tile_size = 1i32 << band.lod;
-	let tile_max = min + IVec3::splat(tile_size);
-	let in_outer = min.cmpge(band.outer.min()).all() && tile_max.cmple(band.outer.end()).all();
-	let outside_inner = band.inner.is_none_or(|inner| !(min.cmpge(inner.min()).all() && tile_max.cmple(inner.end()).all()));
-	in_outer && outside_inner
+fn is_tile_in_band(band: LodBand, key: TileClassKey) -> bool {
+	let region = Region::from(key.tile_key.region);
+	band.outer.contains_region(region) && band.inner.is_none_or(|inner| !inner.contains_region(region))
 }
 
+/// Runs `f(key, is_added)` for every tile that is in `new_bands` but not `old_bands` and the reverse.
 pub(crate) fn run_over_diff(
 	old_bands: &[LodBand],
 	new_bands: &[LodBand],
+	tile_size: u32,
 	node_bounds: &NodeBounds,
-	mut f: impl FnMut(u8, IVec3, bool),
+	mut f: impl FnMut(TileClassKey, bool),
 ) {
+	let mut classes: Vec<ComponentId> = old_bands.iter().chain(new_bands.iter()).map(|band| band.class).collect();
+	classes.sort();
+	classes.dedup();
 	let Some(max_lod) = old_bands.iter().chain(new_bands.iter()).map(|band| band.lod).max() else { return };
 
-	for lod in 0..=max_lod {
-		let (old_outer, old_inner) = band_boxes(old_bands, lod);
-		let (new_outer, new_inner) = band_boxes(new_bands, lod);
-		if new_outer == old_outer && new_inner == old_inner { continue; }
-		let size = 1u32 << lod;
-		emit_minus_minus(new_outer, old_outer, new_inner, lod, size, true, node_bounds, &mut f);
-		emit_minus(intersection(new_outer, old_inner), new_inner, lod, size, true, node_bounds, &mut f);
+	for class in classes {
+		for lod in 0..=max_lod {
+			let (old_outer, old_inner) = band_boxes(old_bands, class, lod);
+			let (new_outer, new_inner) = band_boxes(new_bands, class, lod);
+			if new_outer == old_outer && new_inner == old_inner { continue; }
+			let mut emit = |region: Region, added: bool| {
+				let Ok(region) = region.try_into() else { return; };
+				node_bounds.repeat_over_area(region, UVec3::splat(tile_size << lod), IVec3::ZERO, |min| {
+					f(TileClassKey::new(tile_size, class, lod, min), added);
+				});
+			};
 
-		emit_minus_minus(old_outer, new_outer, old_inner, lod, size, false, node_bounds, &mut f);
-		emit_minus(intersection(old_outer, new_inner), old_inner, lod, size, false, node_bounds, &mut f);
+			for slab in region_minus_region(new_outer, old_outer) {
+				for piece in region_minus_region(slab, new_inner) { emit(piece, true); }
+			}
+			for piece in region_minus_region(intersection(new_outer, old_inner), new_inner) { emit(piece, true); }
+
+			for slab in region_minus_region(old_outer, new_outer) {
+				for piece in region_minus_region(slab, old_inner) { emit(piece, false); }
+			}
+			for piece in region_minus_region(intersection(old_outer, new_inner), old_inner) { emit(piece, false); }
+		}
 	}
+}
+
+/// If any class has more than one band for the same lod.
+pub(crate) fn has_duplicate_bands(bands: &[LodBand]) -> bool {
+	bands.iter().enumerate().any(|(i, a)| bands[..i].iter().any(|b| a.class == b.class && a.lod == b.lod))
 }
 
 fn empty_region() -> Region {
@@ -78,33 +106,10 @@ fn intersection(a: Region, b: Region) -> Region {
 	a.intersection(b).map(Into::into).unwrap_or_else(empty_region)
 }
 
-fn band_boxes(bands: &[LodBand], lod: u8) -> (Region, Region) {
-	match bands.iter().find(|band| band.lod == lod) {
+fn band_boxes(bands: &[LodBand], class: ComponentId, lod: u8) -> (Region, Region) {
+	match bands.iter().find(|band| band.class == class && band.lod == lod) {
 		Some(band) => (band.outer, band.inner.unwrap_or_else(empty_region)),
 		None => (empty_region(), empty_region()),
-	}
-}
-
-fn emit_minus<F: FnMut(u8, IVec3, bool)>(region: Region, cut: Region, lod: u8, size: u32, added: bool, node_bounds: &NodeBounds, f: &mut F) {
-	for slab in region_minus_region(region, cut) {
-		emit_region(slab, lod, size, added, node_bounds, f);
-	}
-}
-
-fn emit_minus_minus<F: FnMut(u8, IVec3, bool)>(
-	region: Region,
-	cut_a: Region,
-	cut_b: Region,
-	lod: u8,
-	size: u32,
-	added: bool,
-	node_bounds: &NodeBounds,
-	f: &mut F,
-) {
-	for slab in region_minus_region(region, cut_a) {
-		for piece in region_minus_region(slab, cut_b) {
-			emit_region(piece, lod, size, added, node_bounds, f);
-		}
 	}
 }
 
@@ -123,9 +128,4 @@ fn region_minus_region(a: Region, b: Region) -> [Region; 6] {
 		Region::from_min_end(IVec3::new(i.min().x, i.min().y, a.min().z), IVec3::new(i.end().x, i.end().y, i.min().z)).unwrap(),
 		Region::from_min_end(IVec3::new(i.min().x, i.min().y, i.end().z), IVec3::new(i.end().x, i.end().y, a.end().z)).unwrap(),
 	]
-}
-
-fn emit_region<F: FnMut(u8, IVec3, bool)>(region: Region, lod: u8, size: u32, added: bool, node_bounds: &NodeBounds, f: &mut F) {
-	let Ok(region) = region.try_into() else { return; };
-	node_bounds.repeat_over_area(region, UVec3::splat(size), IVec3::ZERO, |tile_min| f(lod, tile_min, added));
 }

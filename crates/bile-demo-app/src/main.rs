@@ -1,12 +1,24 @@
-use bevy::{prelude::*};
+use bevy::{
+	camera_controller::free_camera::{FreeCamera, FreeCameraPlugin},
+	prelude::*,
+};
+use bile_region_loader::{RegionLoaderComponent, RegionLoaderPlugin};
 
-mod render_mesh_omponent_source;
+mod lod_camera;
+mod terrain;
+
+/// Marker for the loader that decides what is rendered.
+pub struct MainRendering;
+pub type MainRenderingLoader = RegionLoaderComponent<MainRendering>;
 
 fn main() {
 	App::new()
 		.add_plugins(DefaultPlugins)
+		.add_plugins(FreeCameraPlugin)
 		.add_plugins(bile::DefaultBilePlugins)
-		.add_plugins(render_mesh_omponent_source::RenderMeshComponentSourcePlugin)
+		.add_plugins(RegionLoaderPlugin::<MainRendering>::default())
+		.add_plugins((terrain::TerrainPlugin, lod_camera::LodCameraPlugin))
+		.insert_resource(ClearColor(Color::srgb(0.6, 0.75, 0.9)))
 		.add_systems(Startup, scene.spawn())
 		.run();
 }
@@ -14,26 +26,22 @@ fn main() {
 fn scene() -> impl SceneList {
 	bsn_list! [
 		(
-			#CircularBase
-			Mesh3d(asset_value(Circle::new(4.0)))
-			MeshMaterial3d::<StandardMaterial>(asset_value(Color::WHITE))
-			Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-		),
-		(
-			#Cube
-			// Mesh3d(asset_value(Cuboid::new(1.0, 1.0, 1.0)))
-			MeshMaterial3d::<StandardMaterial>(asset_value(Color::srgb_u8(124, 144, 255)))
-			Transform::from_xyz(0.0, 0.5, 0.0)
-		),
-		(
-			PointLight {
-				shadow_maps_enabled: true,
+			DirectionalLight {
+				illuminance: 8000.0,
 			}
-			Transform::from_xyz(4.0, 8.0, 4.0)
+			template_value(Transform::from_xyz(1.0, 2.0, 0.5).looking_at(Vec3::ZERO, Vec3::Y))
 		),
 		(
 			Camera3d
-			template_value(Transform::from_xyz(-2.5, 4.5, 9.0).looking_at(Vec3::ZERO, Vec3::Y))
+			lod_camera::LodCamera
+			template_value(FreeCamera { walk_speed: 60.0, run_speed: 600.0, ..default() })
+			template_value(Projection::Perspective(PerspectiveProjection { far: 100_000.0, ..default() }))
+			template_value(DistanceFog {
+				color: Color::srgb(0.6, 0.75, 0.9),
+				falloff: FogFalloff::Linear { start: 4000.0, end: 30000.0 },
+				..default()
+			})
+			template_value(Transform::from_xyz(0.0, 250.0, 0.0).looking_at(Vec3::new(400.0, 0.0, 400.0), Vec3::Y))
 		)
 	]
 }

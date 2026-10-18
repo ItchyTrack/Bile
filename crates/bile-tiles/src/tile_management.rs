@@ -4,16 +4,22 @@ use bevy::prelude::*;
 use bevy::ecs::component::ComponentId;
 use bile_math::NonZeroRegion;
 
-use crate::{DesiredComponents, TileKey, TileKeyMap};
+use crate::{DesiredComponents, TileClassReady, TileKey, TileKeyMap};
 
+/// Owns the tiles of a node. Tiles are spawned as children of this entity when a class is first
+/// added to them and despawned once no classes remain. Classes must be zero sized marker components.
 #[derive(Component, Default, Debug)]
 pub struct TileInstances {
 	tile_class_additions: HashMap<TileKey, HashMap<ComponentId, i32>>,
+	// Every add since the last update, even ones canceled by a removal. Requesters re-adding a
+	// class that is already loaded still need to be told it is ready.
+	added_classes: Vec<(TileKey, ComponentId)>,
 	key_to_entity: TileKeyMap<Entity>,
 }
 
 impl TileInstances {
 	pub fn add_class(&mut self, tile_key: TileKey, class: ComponentId) {
+		self.added_classes.push((tile_key, class));
 		let Some(classes) = self.tile_class_additions.get_mut(&tile_key) else {
 			self.tile_class_additions.insert(tile_key, HashMap::from([(class, 1)]));
 			return;
@@ -52,8 +58,8 @@ impl TileInstances {
 			classes.remove(&class);
 		}
 	}
-	pub fn get(&mut self, tile_key: TileKey) -> Option<&Entity> {
-		self.key_to_entity.get(tile_key)
+	pub fn get(&self, tile_key: TileKey) -> Option<Entity> {
+		self.key_to_entity.get(tile_key).copied()
 	}
 	pub fn for_each_overlapping(&self, region: NonZeroRegion, f: impl FnMut(TileKey)) {
 		self.key_to_entity.for_each_overlapping(region, f)
@@ -65,38 +71,60 @@ impl TileInstances {
 
 pub fn modify_tile_classes(
 	mut commands: Commands,
-	mut tile_instances: Query<&mut TileInstances, Without<DesiredComponents>>,
+	mut tile_instances: Query<(Entity, &mut TileInstances), Without<DesiredComponents>>,
 	mut desired_components: Query<&mut DesiredComponents, Without<TileInstances>>,
+	mut ready_messages: MessageWriter<TileClassReady>,
 ) {
-	for mut tile_instance in &mut tile_instances {
-		for tile_class_addition in std::mem::replace(&mut tile_instance.tile_class_additions, default()) {
-			if let Some(entity) = tile_instance.get(tile_class_addition.0) {
-				let Ok(mut desired_component) = desired_components.get_mut(*entity) else {
+	for (instances_entity, mut tile_instance) in &mut tile_instances {
+		if tile_instance.tile_class_additions.is_empty() && tile_instance.added_classes.is_empty() {
+			continue;
+		}
+		let tile_instance = &mut *tile_instance;
+		for (tile_key, class_additions) in std::mem::take(&mut tile_instance.tile_class_additions) {
+			if let Some(entity) = tile_instance.get(tile_key) {
+				let Ok(mut desired_component) = desired_components.get_mut(entity) else {
 					bevy::log::error!("desired_component was not found for entity {}", entity);
 					continue;
 				};
-				let mut entity_commands = commands.entity(*entity);
-				for class_addition in tile_class_addition.1 {
-					if desired_component.update_class(class_addition.0, class_addition.1) {
-						if class_addition.1 > 0 {
-							unsafe { entity_commands.insert_by_id(class_addition.0, ()); }
+				let mut entity_commands = commands.entity(entity);
+				for (class, delta) in class_additions {
+					if desired_component.update_class(class, delta) {
+						if delta > 0 {
+							// SAFETY: classes are zero sized marker components.
+							unsafe { entity_commands.insert_by_id(class, ()); }
 						} else {
-							entity_commands.remove_by_id(class_addition.0);
+							desired_component.remove_class_components(class);
+							entity_commands.remove_by_id(class);
 						}
 					}
 				}
+				if desired_component.get_classes().is_empty() {
+					entity_commands.despawn();
+					tile_instance.key_to_entity.remove(tile_key);
+				}
 			} else {
 				let mut desired_component = DesiredComponents::default();
-				for class_addition in tile_class_addition.1 {
-					desired_component.update_class(class_addition.0, class_addition.1);
+				for (class, delta) in class_additions {
+					desired_component.update_class(class, delta);
 				}
 				if desired_component.get_classes().is_empty() { continue };
 
-				let mut entity_commands = commands.spawn(tile_class_addition.0);
+				let mut entity_commands = commands.spawn((tile_key, ChildOf(instances_entity)));
 				for component_id in desired_component.get_classes().keys() {
+					// SAFETY: classes are zero sized marker components.
 					unsafe { entity_commands.insert_by_id(*component_id, ()); }
 				}
 				entity_commands.insert(desired_component);
+				tile_instance.key_to_entity.insert(tile_key, entity_commands.id());
+			}
+		}
+
+		// Classes that were already loaded will not become ready again, so tell the new requester now.
+		for (tile_key, class) in std::mem::take(&mut tile_instance.added_classes) {
+			let Some(entity) = tile_instance.get(tile_key) else { continue };
+			let Ok(desired_component) = desired_components.get(entity) else { continue };
+			if desired_component.has_class(class) && desired_component.is_class_ready(class) {
+				ready_messages.write(TileClassReady { entity: instances_entity, tile_entity: entity, tile_key, class });
 			}
 		}
 	}

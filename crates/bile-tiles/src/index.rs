@@ -121,12 +121,12 @@ impl TileIndexKey for TileKey {
 }
 
 #[derive(Debug, Clone)]
-pub struct TileKeyMap<V> {
-	map: HashMap<TileKey, V>,
-	index: TileIndex<TileKey>,
+pub struct TileKeyMap<V, K: TileIndexKey = TileKey> {
+	map: HashMap<K, V>,
+	index: TileIndex<K>,
 }
 
-impl<V> Default for TileKeyMap<V> {
+impl<V, K: TileIndexKey> Default for TileKeyMap<V, K> {
 	fn default() -> Self {
 		Self {
 			map: HashMap::new(),
@@ -135,63 +135,90 @@ impl<V> Default for TileKeyMap<V> {
 	}
 }
 
-impl<V> TileKeyMap<V> {
-	pub fn insert(&mut self, tile_key: TileKey, value: V) -> Option<V> {
+impl<V, K: TileIndexKey> TileKeyMap<V, K> {
+	pub fn insert(&mut self, tile_key: K, value: V) -> Option<V> {
 		let out = self.map.insert(tile_key, value);
 		if out.is_none() {
 			self.index.insert(tile_key);
 		}
 		out
 	}
-	pub fn remove(&mut self, tile_key: TileKey) -> Option<V> {
+	pub fn remove(&mut self, tile_key: K) -> Option<V> {
 		let out = self.map.remove(&tile_key);
 		if out.is_some() {
 			self.index.remove(tile_key);
 		}
 		out
 	}
-	pub fn get(&mut self, tile_key: TileKey) -> Option<&V> {
+	pub fn get(&self, tile_key: K) -> Option<&V> {
 		self.map.get(&tile_key)
 	}
-	pub fn contains(&self, tile_key: TileKey) -> bool {
+	pub fn contains(&self, tile_key: K) -> bool {
 		self.map.contains_key(&tile_key)
 	}
-	pub fn for_each_overlapping(&self, region: NonZeroRegion, mut f: impl FnMut(TileKey)) {
-		self.index.for_each_overlapping(region, |tile_key| f(tile_key));
+	pub fn len(&self) -> usize {
+		self.map.len()
 	}
-	pub fn keys_covering_point(&self, point: IVec3) -> Vec<TileKey> {
-		self.index.keys_covering_point(point).into_iter().map(|tile_key| tile_key).collect()
+	pub fn is_empty(&self) -> bool {
+		self.map.is_empty()
+	}
+	pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
+		self.map.iter().map(|(&tile_key, value)| (tile_key, value))
+	}
+	pub fn for_each_overlapping(&self, region: NonZeroRegion, f: impl FnMut(K)) {
+		self.index.for_each_overlapping(region, f);
+	}
+	pub fn keys_covering_point(&self, point: IVec3) -> Vec<K> {
+		self.index.keys_covering_point(point)
 	}
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct TileKeySet {
-	map: HashSet<TileKey>,
-	index: TileIndex<TileKey>,
+#[derive(Debug, Clone)]
+pub struct TileKeySet<K: TileIndexKey = TileKey> {
+	map: HashSet<K>,
+	index: TileIndex<K>,
 }
 
-impl TileKeySet {
-	pub fn insert(&mut self, tile_key: TileKey) -> bool {
+impl<K: TileIndexKey> Default for TileKeySet<K> {
+	fn default() -> Self {
+		Self {
+			map: HashSet::new(),
+			index: TileIndex::default(),
+		}
+	}
+}
+
+impl<K: TileIndexKey> TileKeySet<K> {
+	pub fn insert(&mut self, tile_key: K) -> bool {
 		let out = self.map.insert(tile_key);
 		if out {
 			self.index.insert(tile_key);
 		}
 		out
 	}
-	pub fn remove(&mut self, tile_key: TileKey) -> bool {
+	pub fn remove(&mut self, tile_key: K) -> bool {
 		let out = self.map.remove(&tile_key);
 		if out {
 			self.index.remove(tile_key);
 		}
 		out
 	}
-	pub fn contains(&self, tile_key: TileKey) -> bool {
+	pub fn contains(&self, tile_key: K) -> bool {
 		self.map.contains(&tile_key)
 	}
-	pub fn for_each_overlapping(&self, region: NonZeroRegion, mut f: impl FnMut(TileKey)) {
-		self.index.for_each_overlapping(region, |tile_key| f(tile_key));
+	pub fn len(&self) -> usize {
+		self.map.len()
 	}
-	pub fn keys_covering_point(&self, point: IVec3) -> Vec<TileKey> {
-		self.index.keys_covering_point(point).into_iter().map(|tile_key| tile_key).collect()
+	pub fn is_empty(&self) -> bool {
+		self.map.is_empty()
+	}
+	pub fn iter(&self) -> impl Iterator<Item = K> + '_ {
+		self.map.iter().copied()
+	}
+	pub fn for_each_overlapping(&self, region: NonZeroRegion, f: impl FnMut(K)) {
+		self.index.for_each_overlapping(region, f);
+	}
+	pub fn keys_covering_point(&self, point: IVec3) -> Vec<K> {
+		self.index.keys_covering_point(point)
 	}
 }
