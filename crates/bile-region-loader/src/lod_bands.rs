@@ -1,9 +1,10 @@
-use bevy::prelude::*;
+use bevy::{ecs::component::ComponentId, prelude::*};
 use bile_math::{Region, NonZeroRegion};
 use bile_scene::NodeBounds;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct LodBand {
+	pub(crate) class: ComponentId,
 	pub(crate) lod: u8,
 	pub(crate) outer: Region,
 	pub(crate) inner: Option<Region>,

@@ -13,43 +13,43 @@ pub struct TileInstances {
 }
 
 impl TileInstances {
-	pub fn add_class(&mut self, tile_key: TileKey, component_id: ComponentId) {
-		let Some(components) = self.tile_class_additions.get_mut(&tile_key) else {
-			self.tile_class_additions.insert(tile_key, HashMap::from([(component_id, 1)]));
+	pub fn add_class(&mut self, tile_key: TileKey, class: ComponentId) {
+		let Some(classes) = self.tile_class_additions.get_mut(&tile_key) else {
+			self.tile_class_additions.insert(tile_key, HashMap::from([(class, 1)]));
 			return;
 		};
 
-		let Some(counter) = components.get_mut(&component_id) else {
-			components.insert(component_id, 1);
+		let Some(counter) = classes.get_mut(&class) else {
+			classes.insert(class, 1);
 			return;
 		};
 
 		if *counter != -1 {
 			*counter += 1;
-		} else if components.len() == 1 {
+		} else if classes.len() == 1 {
 			self.tile_class_additions.remove(&tile_key);
 		} else {
-			components.remove(&component_id);
+			classes.remove(&class);
 		}
 	}
 
-	pub fn remove_class(&mut self, tile_key: TileKey, component_id: ComponentId) {
-		let Some(components) = self.tile_class_additions.get_mut(&tile_key) else {
-			self.tile_class_additions.insert(tile_key, HashMap::from([(component_id, -1)]));
+	pub fn remove_class(&mut self, tile_key: TileKey, class: ComponentId) {
+		let Some(classes) = self.tile_class_additions.get_mut(&tile_key) else {
+			self.tile_class_additions.insert(tile_key, HashMap::from([(class, -1)]));
 			return;
 		};
 
-		let Some(counter) = components.get_mut(&component_id) else {
-			components.insert(component_id, -1);
+		let Some(counter) = classes.get_mut(&class) else {
+			classes.insert(class, -1);
 			return;
 		};
 
 		if *counter != 1 {
 			*counter -= 1;
-		} else if components.len() == 1 {
+		} else if classes.len() == 1 {
 			self.tile_class_additions.remove(&tile_key);
 		} else {
-			components.remove(&component_id);
+			classes.remove(&class);
 		}
 	}
 	pub fn get(&mut self, tile_key: TileKey) -> Option<&Entity> {

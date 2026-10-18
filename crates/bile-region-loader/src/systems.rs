@@ -1,4 +1,4 @@
-use bevy::{ecs::message::MessageReader, prelude::*};
+use bevy::{ecs::{component::ComponentId, message::MessageReader}, prelude::*};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{TileInstances, TileKey};
@@ -13,12 +13,13 @@ fn acquire_tile(
 	tile_instances: &mut TileInstances,
 	lifecycle: &mut crate::tile_lifecycle::TileLifecycle,
 	requester_entity: Entity,
-	key: TileKey,
+	tile_key: TileKey,
+	class: ComponentId,
 	priority: f32,
 ) {
-	if tile_instances.fetch_tile(requester_entity, key.tile_key, priority, true) { return; }
-	let released = lifecycle.resolve(key, ResolvedTile::Empty);
-	for key in released { tile_instances.release_tile(key.entity, requester_entity, key); }
+	tile_instances.add_class(tile_key, class);
+	let released = lifecycle.resolve(tile_key, ResolvedTile::Empty);
+	for key in released { tile_instances.remove_class(tile_key, class); } // this class is wrong sometimes!
 }
 
 pub(crate) fn update_region_loader_requests(
