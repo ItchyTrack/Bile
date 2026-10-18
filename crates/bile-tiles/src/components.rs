@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*};
 
-use crate::{TileKey, component_source::{ComponentSource, FinishedRequestMessage}};
+use crate::{TileKey, component_source::{CancelRequestMessage, ComponentSource, FinishedRequestMessage}};
 
 #[derive(Debug, Clone, Copy, Message)]
 pub struct TileClassReady {
@@ -20,6 +20,8 @@ pub struct DesiredComponents {
 	newly_desired_components: HashSet<ComponentId>,
 	newly_undesired_components: HashSet<ComponentId>,
 	finished_components: HashSet<ComponentId>,
+	requested_components: HashSet<ComponentId>,
+	cancelled_components: HashSet<ComponentId>,
 	ready_classes: HashSet<ComponentId>,
 }
 
@@ -29,7 +31,11 @@ impl DesiredComponents {
 			let desired_count = self.components.entry(component_id).or_default();
 			*desired_count += 1;
 			if *desired_count == 1 {
-				self.newly_desired_components.insert(component_id);
+				if self.cancelled_components.remove(&component_id) {
+					self.requested_components.insert(component_id);
+				} else {
+					self.newly_desired_components.insert(component_id);
+				}
 				self.newly_undesired_components.remove(&component_id);
 			}
 			1
@@ -69,6 +75,9 @@ impl DesiredComponents {
 		if *desired_count == 1 {
 			self.components.remove(&component_id);
 			self.finished_components.remove(&component_id);
+			if self.requested_components.remove(&component_id) {
+				self.cancelled_components.insert(component_id);
+			}
 			self.newly_desired_components.remove(&component_id);
 			self.newly_undesired_components.insert(component_id);
 		} else {
@@ -111,8 +120,15 @@ impl DesiredComponents {
 	}
 	fn finish_component(&mut self, component_id: ComponentId) {
 		if self.components.contains_key(&component_id) {
+			self.requested_components.remove(&component_id);
 			self.finished_components.insert(component_id);
 		}
+	}
+	pub(crate) fn take_cancelled_requests(&mut self, despawning: bool) -> impl Iterator<Item = ComponentId> + '_ {
+		if despawning {
+			self.cancelled_components.extend(self.requested_components.drain());
+		}
+		self.cancelled_components.drain()
 	}
 	fn class_ready(&self, class_id: ComponentId) -> bool {
 		self.components_by_class
@@ -145,11 +161,15 @@ pub(crate) fn remove_desired_components_for_removed_classes<T: Component>(
 
 pub(crate) fn remove_newly_undesired_components(
 	mut commands: Commands,
-	mut desired_components_managers: Query<(Entity, &mut DesiredComponents)>,
+	mut desired_components_managers: Query<(Entity, &mut DesiredComponents, &TileKey, &ChildOf)>,
+	mut cancel_messages: MessageWriter<CancelRequestMessage>,
 ) {
-	for (entity, mut desired_components_manager) in &mut desired_components_managers {
-		if desired_components_manager.newly_undesired_components.is_empty() {
+	for (entity, mut desired_components_manager, &tile_key, child_of) in &mut desired_components_managers {
+		if desired_components_manager.newly_undesired_components.is_empty() && desired_components_manager.cancelled_components.is_empty() {
 			continue;
+		}
+		for component_id in desired_components_manager.take_cancelled_requests(false) {
+			cancel_messages.write(CancelRequestMessage { entity: child_of.parent(), tile_entity: entity, tile_key, component_id });
 		}
 
 		let mut entity_commands = commands.entity(entity);
@@ -167,6 +187,7 @@ pub(crate) fn request_newly_desired(
 		if desired_components_manager.newly_desired_components.is_empty() {
 			continue;
 		}
+		let desired_components_manager = &mut *desired_components_manager;
 		for component_id in desired_components_manager.newly_desired_components.drain() {
 			let mut best: Option<(Entity, usize, f32)> = None;
 			for (source_entity, sources) in component_sources.iter_mut() {
@@ -178,9 +199,9 @@ pub(crate) fn request_newly_desired(
 				}
 			}
 			let Some((source_entity, index, _)) = best else {
-				bevy::log::warn!("No ComponentSource can provide component {component_id:?} for tile {tile_key:?}");
-				continue;
+				panic!("No ComponentSource can provide component {component_id:?} for tile {tile_key:?}");
 			};
+			desired_components_manager.requested_components.insert(component_id);
 			let (_, mut sources) = component_sources.get_mut(source_entity).unwrap();
 			sources.iter_mut().nth(index).unwrap().request_component(child_of.parent(), tile_entity, tile_key, component_id);
 		}
