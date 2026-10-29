@@ -1,6 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy_trait_query::One;
 use downcast_rs::{Downcast, impl_downcast};
 
 pub trait RequestKey: Downcast { }
@@ -38,46 +39,82 @@ impl<T: 'static> Data for DataOf<T> {
 }
 
 pub struct DataRequesterQueue<'requester> {
-	queue: &'requester mut VecDeque<Request>,
+	next_request_id: &'requester mut RequestId,
+	queue: &'requester mut VecDeque<(Request, RequestId)>,
 }
 
 impl<'requester> DataRequesterQueue<'requester> {
-	pub fn request(&mut self, request: Request) {
-		self.queue.push_back(request);
+	pub fn request(&mut self, request: Request) -> RequestId {
+		let this_request_id = *self.next_request_id;
+		self.queue.push_back((request, this_request_id));
+		self.next_request_id.0 += 1;
+		this_request_id
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestId(pub(crate) u64);
+
+// There should only be one DataProcessingNode per entity
 #[bevy_trait_query::queryable]
 pub trait DataProcessingNode {
 	fn cost(&self, request: &Request) -> Option<f32>; // None if the node can not fulfill the request
-	fn request<'requester>(&mut self, request: Request, data_requester_queue: &mut DataRequesterQueue<'requester>);
+	fn request<'requester>(&mut self, request: Request, request_id: RequestId, data_requester_queue: &mut DataRequesterQueue<'requester>);
 	fn drop(&mut self, request: &Request); // this both cancels requests and stops dirting from propagating up.
 	fn pass_data(&mut self, request: &Request, data: Box<dyn Data>);
 	fn dirty_data(&mut self, request: &Request); // will be passed the diff later
 }
 
+#[derive(Resource)]
+pub struct RequestTracker {
+	next_request_id: RequestId,
+	waiting: HashMap<RequestId, Entity>,
+}
+
 #[derive(SystemParam)]
 pub struct DataRequester<'w, 's> {
-	data_processing_node: Query<'w, 's, &'static mut dyn DataProcessingNode>,
+	request_tracker: ResMut<'w, RequestTracker>,
+	data_processing_nodes: Query<'w, 's, (One<&'static mut dyn DataProcessingNode>, Entity)>,
 }
 
 impl<'w, 's> DataRequester<'w, 's> {
-	pub fn request(&mut self, request: Request) {
+	pub fn request(&mut self, request: Request, requester_node: Option<Entity>) -> RequestId {
+		let this_request_id = self.request_tracker.next_request_id;
+		self.request_tracker.next_request_id.0 += 1;
+		self.request_force_id(request, this_request_id, requester_node);
+		this_request_id
+	}
+	fn request_force_id(&mut self, request: Request, this_request_id: RequestId, requester_node: Option<Entity>) {
+		// get node
+		let node_entity = Self::best_node(&self.data_processing_nodes, &request);
+		let mut node = self.data_processing_nodes.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
+		// update requester
+		if let Some(requester_node) = requester_node { self.request_tracker.waiting.insert(this_request_id, requester_node); }
+		// create queue
 		let mut queue = VecDeque::default();
-		queue.push_back(request);
-		while let Some(request) = queue.pop_back() {
-			let mut best = (f32::MAX, None);
-			for node in self.data_processing_node.iter_mut().flatten() {
-				let Some(cost) = node.cost(&request) else { continue; };
-				if best.0 > cost {
-					best.0 = cost;
-					best.1 = Some(node);
-				}
-			}
-			let Some(mut node) = best.1 else {
-				panic!("Data request failed to find node to fulfill the request. This should never happen!");
-			};
-			node.request(request, &mut DataRequesterQueue{ queue: &mut queue });
+		// request dat
+		node.request(request, this_request_id, &mut DataRequesterQueue{
+			next_request_id: &mut self.request_tracker.next_request_id,
+			queue: &mut queue,
+		});
+		// loop over all queued requests
+		for (request, request_id) in queue.drain(..) {
+			// request data
+			self.request_force_id(request, request_id, Some(node_entity));
 		}
+	}
+	fn best_node(data_processing_nodes: &Query<'w, 's, (One<&'static mut dyn DataProcessingNode>, Entity)>, request: &Request) -> Entity {
+		let mut best = (f32::MAX, None);
+		for (node, entity) in data_processing_nodes.iter() {
+			let Some(cost) = node.cost(request) else { continue; };
+			if best.0 > cost {
+				best.0 = cost;
+				best.1 = Some(entity);
+			}
+		}
+		let Some(entity) = best.1 else {
+			panic!("Data request failed to find node to fulfill the request. This should never happen!");
+		};
+		entity
 	}
 }
