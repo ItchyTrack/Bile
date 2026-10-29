@@ -1,0 +1,15 @@
+[package]
+name = "bile-data"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { workspace = true }
+bevy-trait-query = { workspace = true }
+downcast-rs = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+bile-math = { workspace = true }
+
+[lints]
+workspace = true

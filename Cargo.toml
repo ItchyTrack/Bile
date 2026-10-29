@@ -3,6 +3,7 @@ resolver = "3"
 
 members = [
 	"crates/bile-math",
+	"crates/bile-data",
 	"crates/bile-tiles",
 	"crates/bile-scene",
 	"crates/bile-scene-source",
@@ -23,6 +24,7 @@ bevy = "0.19"
 bevy_ecs = "0.19"
 bevy-trait-query = "0.19.0"
 crossbeam-channel = "0.5.15"
+downcast-rs = "2.0.1"
 wgpu = "29.0.3"
 serde = "1.0.229"
 log = "0.4"
@@ -34,6 +36,7 @@ rustc-hash = "2.1.2"
 tokio = "1"
 futures = "0.3.32"
 bile-math = { version = "0.1.0", path = "crates/bile-math" }
+bile-data = { version = "0.1.0", path = "crates/bile-data" }
 bile-tiles = { version = "0.1.0", path = "crates/bile-tiles" }
 bile-scene = { version = "0.1.0", path = "crates/bile-scene" }
 bile-scene-source = { version = "0.1.0", path = "crates/bile-scene-source" }
