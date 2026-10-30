@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::{any::TypeId, collections::{HashMap, VecDeque}};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_trait_query::One;
@@ -9,14 +9,15 @@ impl_downcast!(RequestKey);
 
 pub struct Request {
 	tick: u64, // increase everytime anything happens in bile
+	type_id: TypeId,
 	key: Box<dyn RequestKey>
 }
 
 impl Request {
 	pub fn tick(&self) -> u64 { self.tick }
+	pub fn type_id(&self) -> TypeId { self.type_id }
 	pub fn key(&self) -> &dyn RequestKey { self.key.as_ref() }
 	pub fn key_as<T: RequestKey>(&self) -> Option<&T> { self.key.downcast_ref() }
-	// pub fn take_key(self) -> Box<dyn RequestKey> { self.key }
 }
 
 pub trait Data: Downcast {
@@ -60,9 +61,10 @@ pub struct RequestId(pub(crate) u64);
 pub trait DataProcessingNode {
 	fn cost(&self, request: &Request) -> Option<f32>; // None if the node can not fulfill the request
 	fn request<'requester>(&mut self, request: Request, request_id: RequestId, data_requester_queue: &mut DataRequesterQueue<'requester>);
-	fn drop(&mut self, request: &Request); // this both cancels requests and stops dirting from propagating up.
-	fn pass_data(&mut self, request: &Request, data: Box<dyn Data>);
+	fn drop(&mut self, request: RequestId); // this both cancels requests and stops dirting from propagating up.
+	fn pass_data(&mut self, request_id: RequestId, data: Box<dyn Data>);
 	fn dirty_data(&mut self, request: &Request); // will be passed the diff later
+	fn drain_finished(&mut self) -> Vec<(RequestId, Box<dyn Data>)>;
 }
 
 #[derive(Resource)]
@@ -116,5 +118,18 @@ impl<'w, 's> DataRequester<'w, 's> {
 			panic!("Data request failed to find node to fulfill the request. This should never happen!");
 		};
 		entity
+	}
+}
+
+pub fn pass_data(
+	request_tracker: ResMut<RequestTracker>,
+	mut data_processing_nodes: Query<One<&'static mut dyn DataProcessingNode>>,
+) {
+	for mut node in data_processing_nodes.iter_mut() {
+		for (request_id, data) in node.drain_finished().drain(..) {
+			let Some(&target_entity) = request_tracker.waiting.get(&request_id) else { continue; };
+			let Ok(mut target_node) = data_processing_nodes.get_mut(target_entity) else { continue; };
+			target_node.pass_data(request_id, data);
+		}
 	}
 }
