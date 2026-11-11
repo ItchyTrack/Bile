@@ -64,13 +64,14 @@ pub trait DataConsumingNode<DT: DataType> {
 
 #[derive(Resource, Default)]
 pub struct DataColumn<DT: DataType> {
-	data: HashMap<DT::Params, (DirtyState, DT::Data, HashSet<Entity>)>,
-	new_data: HashMap<DT::Params, HashSet<Entity>>,
+	data: HashMap<DT::Params, (DirtyState, DT::Data, HashSet<Entity>, Entity)>,
+	data_to_drop: HashMap<DT::Params, HashSet<Entity>>, // this data is no longer requested from this Entity. Either no one wants it or something else provided it.
+	finished: HashMap<DT::Params, HashSet<Entity>>,
 	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
 }
 
 impl<DT: DataType> DataColumn<DT> {
-	pub fn get(&self, params: &DT::Params) -> Option<&(DirtyState, DT::Data, HashSet<Entity>)> { self.data.get(params) }
+	pub fn get(&self, params: &DT::Params) -> Option<&(DirtyState, DT::Data, HashSet<Entity>, Entity)> { self.data.get(params) }
 }
 
 #[derive(SystemParam)]
@@ -81,7 +82,7 @@ pub struct DataRequester<'w, 's, DT: DataType> {
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		if let Some((dirty_state, data, usages)) = self.data_column.data.get_mut(&request.params) {
+		if let Some((dirty_state, data, usages, _source_entity)) = self.data_column.data.get_mut(&request.params) {
 			if dirty_state.satisfies(&request.allowed_tick) {
 				usages.insert(requester_node);
 				return Some(data.clone());
@@ -95,6 +96,10 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 		// create queue
 		node.request(request);
 		None
+	}
+
+	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
+
 	}
 
 	fn best_node(data_producing_node: &Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>, request: &Request<DT>) -> Entity {
@@ -122,7 +127,7 @@ pub struct DataDirtier<'w, 's, DT: DataType> {
 
 impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
 	pub fn mark_dirty(&mut self, params: &DT::Params) {
-		let Some((dirty_state, _data, usages)) = &mut self.data_column.data.get_mut(params) else { return; };
+		let Some((dirty_state, _data, usages, _source_entity)) = &mut self.data_column.data.get_mut(params) else { return; };
 		*dirty_state = DirtyState::Dirty { tick: self.bile_state_tick.current_tick - 1 /* Was valid on the last tick */ };
 		usages.retain(|&usage| {
 			let Ok(mut data_producing_node) = self.data_producing_nodes.get_mut(usage) else {
@@ -141,8 +146,8 @@ pub struct DataPasser<'w, DT: DataType> {
 }
 
 impl<'w, DT: DataType> DataPasser<'w, DT> {
-	pub fn pass_data(&mut self, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
-		if let Some((existing, _, _)) = self.data_column.data.get(params) && existing.is_fresher_than(&dirty_state) {
+	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
+		if let Some((existing, _, _, _)) = self.data_column.data.get(params) && existing.is_fresher_than(&dirty_state) {
 			return;
 		}
 
@@ -150,16 +155,24 @@ impl<'w, DT: DataType> DataPasser<'w, DT> {
 
 		match self.data_column.data.entry(params.clone()) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				let (old_dirty_state, old_data, _usages) = entry.get_mut();
+				let (old_dirty_state, old_data, _usages, old_source_entity) = entry.get_mut();
 				*old_dirty_state = dirty_state;
 				*old_data = data;
+				if *old_source_entity != source_entity {
+					let old_source_entity_copy = *old_source_entity;
+					*old_source_entity = source_entity;
+					let old_sources = self.data_column.data_to_drop.entry(params.clone()).or_default();
+					old_sources.remove(&source_entity);
+					old_sources.insert(old_source_entity_copy);
+				}
 			}
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((dirty_state, data, HashSet::default()));
+				entry.insert((dirty_state, data, HashSet::default(), source_entity));
+				self.data_column.data_to_drop.entry(params.clone()).or_default().remove(&source_entity);
 			}
 		}
 
-		let satisfied = self.data_column.new_data.entry(params.clone()).or_default();
+		let satisfied = self.data_column.finished.entry(params.clone()).or_default();
 		let mut still_waiting = HashMap::default();
 		for (entity, required) in waiting {
 			if dirty_state.satisfies(&required) {
@@ -179,10 +192,10 @@ pub fn pass_data<DT: DataType>(
 	mut data_column: ResMut<DataColumn<DT>>,
 	mut data_consuming_nodes: Query<One<&'static mut dyn DataConsumingNode<DT>>>,
 ) {
-	if data_column.new_data.is_empty() { return; }
+	if data_column.finished.is_empty() { return; }
 
-	for new_data_params in std::mem::replace(&mut data_column.new_data, HashMap::default()) {
-		let (dirty_state, new_data, usages) = &mut data_column.data.get_mut(&new_data_params.0).expect("Its not new data if its not there!");
+	for new_data_params in std::mem::replace(&mut data_column.finished, HashMap::default()) {
+		let (dirty_state, new_data, usages, _source_entity) = &mut data_column.data.get_mut(&new_data_params.0).expect("Its not new data if its not there!");
 		for entity in new_data_params.1 {
 			let Ok(mut data_consuming_node) = data_consuming_nodes.get_mut(entity) else { continue; };
 			usages.insert(entity);
