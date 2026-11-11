@@ -3,6 +3,9 @@ use std::{collections::{HashMap, HashSet}, hash::Hash};
 use bevy::{app::MainScheduleOrder, ecs::{schedule::ScheduleLabel, system::SystemParam}, prelude::*};
 use bevy_trait_query::One;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Resource, Default)]
 pub struct StateTick {
 	current_tick: u64,
@@ -99,11 +102,16 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 				return Some(data.clone());
 			}
 		}
+		let already_requested = self.data_column.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|required| required.satisfies(&request.allowed_tick)));
+		// update requester
+		self.data_column.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
+		if already_requested { return None; }
 		// get node
 		let node_entity = Self::best_node(&self.data_producing_node, &request);
 		let mut node = self.data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
-		// update requester
-		self.data_column.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
+		if let Some(sources) = self.data_column.data_to_drop.get_mut(&request.params) {
+			sources.remove(&node_entity);
+		}
 		// create queue
 		node.request(request);
 		None
@@ -187,7 +195,12 @@ impl<'w, DT: DataType> DataPasser<'w, DT> {
 			return;
 		}
 
-		let Some(waiting) = self.data_column.waiting.remove(params) else { return; /* No need to store data thats not wanted */ };
+		let Some(waiting) = self.data_column.waiting.remove(params) else {
+			if self.data_column.data.get(params).is_none_or(|(_, _, _, existing_source)| *existing_source != source_entity) {
+				self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
+			}
+			return; /* No need to store data thats not wanted */
+		};
 
 		match self.data_column.data.entry(params.clone()) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -286,6 +299,7 @@ impl BileAddDataType for App {
 	}
 }
 
+#[derive(Default)]
 pub struct BileDataPlugin {}
 
 impl Plugin for BileDataPlugin {
@@ -304,6 +318,7 @@ impl Plugin for BileDataPlugin {
 			).chain(),
 		);
 
+		app.init_resource::<StateTick>();
 		app.add_systems(BileDataSchedule, update_bile_state_tick.in_set(BileDataSystemSet::UpdateStateTick));
 	}
 }

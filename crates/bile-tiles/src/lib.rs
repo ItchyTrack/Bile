@@ -1,14 +1,12 @@
 mod key;
 mod index;
 mod components;
-mod component_source;
 mod tile_management;
 
 use bevy::{app::MainScheduleOrder, ecs::schedule::ScheduleLabel, prelude::*};
-pub use components::{DesiredComponents, TileClassReady};
+pub use components::{DesireForClass, DesiredComponents, TileClassReady};
 pub use index::{TileIndex, TileIndexKey, TileKeyMap, TileKeySet};
 pub use key::TileKey;
-pub use component_source::{CancelRequestMessage, ComponentSource, FinishedRequestMessage};
 pub use tile_management::TileInstances;
 
 #[derive(ScheduleLabel, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,19 +42,13 @@ impl Plugin for TileDataPlugin {
 			).chain(),
 		);
 
-		app.add_message::<FinishedRequestMessage>()
-			.add_message::<CancelRequestMessage>()
-			.add_message::<TileClassReady>();
+		app.add_message::<TileClassReady>();
 
 		app.add_systems(
 			BileTilesSchedule,
 			(
 				components::update_ready_classes.in_set(BileTilesSystemSet::UpdateReadyClasses),
 				tile_management::modify_tile_classes.in_set(BileTilesSystemSet::ClassRequest),
-				(
-					components::remove_newly_undesired_components,
-					components::request_newly_desired,
-				).chain().in_set(BileTilesSystemSet::ComponentRequest),
 			),
 		);
 	}
