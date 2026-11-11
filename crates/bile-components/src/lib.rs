@@ -11,36 +11,29 @@ pub trait ComponentData: DataType<Data = Option<Self::Component>> {
 	type Component: Component + Clone;
 }
 
-#[derive(Debug, Clone, Copy)]
-struct WantState {
-	count: u32,
-	want: ComponentId,
-	resolved: bool,
+#[derive(Debug, Clone, Copy, Message)]
+pub struct ComponentResolved {
+	pub entity: Entity,
+	pub component: ComponentId,
 }
 
-#[derive(Component, Debug, Default)]
-pub struct Wants {
-	wanted: HashMap<ComponentId, WantState>,
-}
-
-impl Wants {
-	pub fn is_wanted(&self, component: ComponentId) -> bool {
-		self.wanted.contains_key(&component)
-	}
-	pub fn is_resolved(&self, component: ComponentId) -> bool {
-		self.wanted.get(&component).is_some_and(|state| state.resolved)
-	}
+#[derive(Resource, Default)]
+struct ComponentDataRegistry {
+	wants_by_component: HashMap<ComponentId, Vec<(ComponentId, fn(&mut EntityWorldMut))>>,
 }
 
 #[derive(Component)]
 pub struct Want<DT: ComponentData> {
 	params: DT::Params,
+	count: u32,
 	requested: bool,
+	resolved: bool,
 	received: Option<DT::Data>,
 }
 
 impl<DT: ComponentData> Want<DT> {
 	pub fn params(&self) -> &DT::Params { &self.params }
+	pub fn is_resolved(&self) -> bool { self.resolved }
 }
 
 impl<DT: ComponentData> DataConsumingNode<DT> for Want<DT> {
@@ -52,33 +45,41 @@ impl<DT: ComponentData> DataConsumingNode<DT> for Want<DT> {
 	}
 }
 
-pub fn want<DT: ComponentData>(entity: &mut EntityWorldMut, params: DT::Params) {
-	let (component, want) = entity.world_scope(|world| (world.register_component::<DT::Component>(), world.register_component::<Want<DT>>()));
-	if !entity.contains::<Wants>() {
-		entity.insert(Wants::default());
-	}
-	let mut wants = entity.get_mut::<Wants>().unwrap();
-	if let Some(state) = wants.wanted.get_mut(&component) {
-		assert!(state.want == want, "an entity can only want a component from one data type");
-		state.count += 1;
-		assert!(entity.get::<Want<DT>>().is_some_and(|existing| existing.params == params), "an entity can only want a component with one set of params");
-		return;
-	}
-	wants.wanted.insert(component, WantState { count: 1, want, resolved: false });
-	entity.insert(Want::<DT> { params, requested: false, received: None });
+fn wants_for(entity: &mut EntityWorldMut, component: ComponentId) -> Vec<(ComponentId, fn(&mut EntityWorldMut))> {
+	entity.world_scope(|world| world.resource::<ComponentDataRegistry>().wants_by_component.get(&component).cloned().unwrap_or_default())
 }
 
-pub fn unwant(entity: &mut EntityWorldMut, component: ComponentId) {
-	let Some(mut wants) = entity.get_mut::<Wants>() else { return };
-	let Some(state) = wants.wanted.get_mut(&component) else {
+pub fn want<DT: ComponentData>(entity: &mut EntityWorldMut, params: DT::Params) {
+	if let Some(mut want) = entity.get_mut::<Want<DT>>() {
+		assert!(want.params == params, "an entity can only want a component with one set of params");
+		want.bypass_change_detection().count += 1;
+		return;
+	}
+	let (component, want) = entity.world_scope(|world| (world.register_component::<DT::Component>(), world.register_component::<Want<DT>>()));
+	assert!(
+		!wants_for(entity, component).iter().any(|&(other, _)| other != want && entity.contains_id(other)),
+		"an entity can only want a component from one data type",
+	);
+	entity.insert(Want::<DT> { params, count: 1, requested: false, resolved: false, received: None });
+}
+
+pub fn unwant<DT: ComponentData>(entity: &mut EntityWorldMut) {
+	let Some(mut want) = entity.get_mut::<Want<DT>>() else {
 		bevy::log::warn!("Negative want on component. This should not happen with correct usage.");
 		return;
 	};
-	state.count -= 1;
-	if state.count > 0 { return; }
-	let want = state.want;
-	wants.wanted.remove(&component);
-	entity.remove_by_ids(&[want, component]);
+	let want = want.bypass_change_detection();
+	want.count -= 1;
+	if want.count == 0 {
+		entity.remove::<(Want<DT>, DT::Component)>();
+	}
+}
+
+pub fn unwant_by_id(entity: &mut EntityWorldMut, component: ComponentId) {
+	match wants_for(entity, component).into_iter().find(|&(want, _)| entity.contains_id(want)) {
+		Some((_, unwant)) => unwant(entity),
+		None => bevy::log::warn!("Negative want on component. This should not happen with correct usage."),
+	}
 }
 
 pub trait WantCommands {
@@ -92,13 +93,10 @@ impl WantCommands for EntityCommands<'_> {
 		self.queue(move |mut entity: EntityWorldMut| want::<DT>(&mut entity, params))
 	}
 	fn unwant<DT: ComponentData>(&mut self) -> &mut Self {
-		self.queue_silenced(|mut entity: EntityWorldMut| {
-			let component = entity.world_scope(|world| world.register_component::<DT::Component>());
-			unwant(&mut entity, component);
-		})
+		self.queue_silenced(|mut entity: EntityWorldMut| unwant::<DT>(&mut entity))
 	}
 	fn unwant_by_id(&mut self, component: ComponentId) -> &mut Self {
-		self.queue_silenced(move |mut entity: EntityWorldMut| unwant(&mut entity, component))
+		self.queue_silenced(move |mut entity: EntityWorldMut| unwant_by_id(&mut entity, component))
 	}
 }
 
@@ -123,12 +121,13 @@ fn update_wants<DT: ComponentData>(
 	component: ComponentIdFor<DT::Component>,
 	mut requester: DataRequester<DT>,
 	mut removed: ResMut<RemovedWants<DT>>,
-	mut wants: Query<(Entity, &mut Want<DT>, &mut Wants), Changed<Want<DT>>>,
+	mut resolved: MessageWriter<ComponentResolved>,
+	mut wants: Query<(Entity, &mut Want<DT>), Changed<Want<DT>>>,
 ) {
 	for (entity, params) in removed.removed.drain(..) {
 		requester.cancel(&params, entity);
 	}
-	for (entity, mut want, mut wants) in &mut wants {
+	for (entity, mut want) in &mut wants {
 		let want = want.bypass_change_detection();
 		if !want.requested {
 			want.requested = true;
@@ -141,8 +140,9 @@ fn update_wants<DT: ComponentData>(
 			Some(data) => { commands.entity(entity).try_insert(data); }
 			None => { commands.entity(entity).try_remove::<DT::Component>(); }
 		}
-		if let Some(state) = wants.wanted.get_mut(&component.get()) {
-			state.resolved = true;
+		if !want.resolved {
+			want.resolved = true;
+			resolved.write(ComponentResolved { entity, component: component.get() });
 		}
 	}
 }
@@ -154,7 +154,11 @@ pub trait AddComponentData {
 impl AddComponentData for App {
 	fn add_component_data<DT: ComponentData>(&mut self) -> &mut Self {
 		self.bile_add_data_type::<DT>();
-		self.init_resource::<RemovedWants<DT>>()
+		let component = self.world_mut().register_component::<DT::Component>();
+		let want = self.world_mut().register_component::<Want<DT>>();
+		self.world_mut().get_resource_or_init::<ComponentDataRegistry>().wants_by_component.entry(component).or_default().push((want, unwant::<DT>));
+		self.add_message::<ComponentResolved>()
+			.init_resource::<RemovedWants<DT>>()
 			.register_component_as::<dyn DataConsumingNode<DT>, Want<DT>>()
 			.add_observer(queue_removed_want::<DT>)
 			.add_systems(PostUpdate, update_wants::<DT>.before(TransformSystems::Propagate))

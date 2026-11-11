@@ -71,9 +71,8 @@ fn wanted_component_is_inserted_when_delivered() {
 
 	pass(&mut app, producer, 3, Some(Value(30)));
 	app.update();
-	let value = value_id(&mut app);
 	assert_eq!(app.world().get::<Value>(entity), Some(&Value(30)));
-	assert!(app.world().get::<Wants>(entity).unwrap().is_resolved(value));
+	assert!(app.world().get::<Want<Num>>(entity).unwrap().is_resolved());
 }
 
 #[test]
@@ -83,9 +82,8 @@ fn empty_data_resolves_without_inserting() {
 	app.update();
 	pass(&mut app, producer, 3, None);
 	app.update();
-	let value = value_id(&mut app);
 	assert!(app.world().get::<Value>(entity).is_none());
-	assert!(app.world().get::<Wants>(entity).unwrap().is_resolved(value));
+	assert!(app.world().get::<Want<Num>>(entity).unwrap().is_resolved());
 }
 
 #[test]
@@ -97,14 +95,14 @@ fn want_is_reference_counted() {
 	pass(&mut app, producer, 3, Some(Value(30)));
 	app.update();
 
-	let value = value_id(&mut app);
-	unwant(&mut app.world_mut().entity_mut(entity), value);
+	unwant::<Num>(&mut app.world_mut().entity_mut(entity));
 	app.update();
 	app.update();
 	assert_eq!(app.world().get::<Value>(entity), Some(&Value(30)));
 	assert!(app.world().get::<Producer>(producer).unwrap().drops.is_empty());
 
-	unwant(&mut app.world_mut().entity_mut(entity), value);
+	let value = value_id(&mut app);
+	unwant_by_id(&mut app.world_mut().entity_mut(entity), value);
 	app.update();
 	app.update();
 	assert!(app.world().get::<Value>(entity).is_none());

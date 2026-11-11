@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*};
-use bile_components::{ComponentData, Wants, WantCommands};
+use bile_components::{ComponentData, ComponentResolved, WantCommands};
 
 use crate::TileKey;
 
@@ -17,6 +17,7 @@ pub struct TileClassReady {
 pub struct DesiredComponents {
 	classes: HashMap<ComponentId, u32>,
 	components_by_class: HashMap<ComponentId, HashMap<ComponentId, u32>>,
+	finished_components: HashSet<ComponentId>,
 	ready_classes: HashSet<ComponentId>,
 }
 
@@ -55,7 +56,8 @@ impl DesireForClass for EntityCommands<'_> {
 				} else {
 					components_for_class.remove(&component_id);
 				}
-				bile_components::unwant(&mut entity, component_id);
+				desired_components.release_finished(component_id);
+				bile_components::unwant::<DT>(&mut entity);
 			} else {
 				*desired_count -= 1;
 			}
@@ -75,7 +77,21 @@ impl DesiredComponents {
 	}
 	#[must_use = "the returned components must be unwanted"]
 	pub(crate) fn remove_class_components(&mut self, class_id: ComponentId) -> Vec<ComponentId> {
-		self.components_by_class.remove(&class_id).map(|components| components.into_keys().collect()).unwrap_or_default()
+		let components: Vec<_> = self.components_by_class.remove(&class_id).map(|components| components.into_keys().collect()).unwrap_or_default();
+		for &component_id in &components {
+			self.release_finished(component_id);
+		}
+		components
+	}
+	fn release_finished(&mut self, component_id: ComponentId) {
+		if !self.is_component_desired(component_id) {
+			self.finished_components.remove(&component_id);
+		}
+	}
+	fn finish_component(&mut self, component_id: ComponentId) {
+		if self.is_component_desired(component_id) {
+			self.finished_components.insert(component_id);
+		}
 	}
 	// returns if a update needs to be made. desired_delta > 0 means add. desired_delta < 0 means remove.
 	pub(crate) fn update_class(&mut self, component_id: ComponentId, desired_delta: i32) -> bool {
@@ -105,13 +121,13 @@ impl DesiredComponents {
 	pub(crate) fn get_classes(&self) -> &HashMap<ComponentId, u32> {
 		&self.classes
 	}
-	fn class_ready(&self, class_id: ComponentId, wants: Option<&Wants>) -> bool {
+	fn class_ready(&self, class_id: ComponentId) -> bool {
 		self.components_by_class
 			.get(&class_id)
-			.is_none_or(|components| components.keys().all(|&component_id| wants.is_some_and(|wants| wants.is_resolved(component_id))))
+			.is_none_or(|components| components.keys().all(|component_id| self.finished_components.contains(component_id)))
 	}
-	fn update_ready_classes(&mut self, wants: Option<&Wants>, newly_ready: &mut Vec<ComponentId>) {
-		let ready: Vec<_> = self.classes.keys().copied().filter(|&class_id| self.class_ready(class_id, wants)).collect();
+	fn update_ready_classes(&mut self, newly_ready: &mut Vec<ComponentId>) {
+		let ready: Vec<_> = self.classes.keys().copied().filter(|&class_id| self.class_ready(class_id)).collect();
 		self.ready_classes.retain(|class_id| ready.contains(class_id));
 		for class_id in ready {
 			if self.ready_classes.insert(class_id) {
@@ -138,12 +154,24 @@ pub(crate) fn remove_desired_components_for_removed_classes<T: Component>(
 }
 
 pub(crate) fn update_ready_classes(
-	mut tiles: Query<(Entity, &mut DesiredComponents, Option<&Wants>, &TileKey, &ChildOf), Or<(Changed<DesiredComponents>, Changed<Wants>)>>,
+	mut resolved_components: MessageReader<ComponentResolved>,
+	mut tiles: ParamSet<(
+		Query<&mut DesiredComponents>,
+		Query<(Entity, &mut DesiredComponents, &TileKey, &ChildOf), Changed<DesiredComponents>>,
+	)>,
 	mut ready_messages: MessageWriter<TileClassReady>,
 ) {
+	{
+		let mut tiles = tiles.p0();
+		for resolved in resolved_components.read() {
+			let Ok(mut desired_components) = tiles.get_mut(resolved.entity) else { continue };
+			desired_components.finish_component(resolved.component);
+		}
+	}
+
 	let mut newly_ready = Vec::new();
-	for (tile_entity, mut desired_components, wants, &tile_key, child_of) in &mut tiles {
-		desired_components.bypass_change_detection().update_ready_classes(wants, &mut newly_ready);
+	for (tile_entity, mut desired_components, &tile_key, child_of) in &mut tiles.p1() {
+		desired_components.bypass_change_detection().update_ready_classes(&mut newly_ready);
 		for class in newly_ready.drain(..) {
 			ready_messages.write(TileClassReady { entity: child_of.parent(), tile_entity, tile_key, class });
 		}
