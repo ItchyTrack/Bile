@@ -13,9 +13,29 @@ pub trait DataType: 'static {
 	type Data: Clone + Send + Sync + 'static;
 }
 
+#[derive(Clone, Copy)]
 pub enum DirtyState {
 	UpToDate,
 	Dirty{tick: u64}
+}
+
+impl DirtyState {
+	pub fn satisfies(&self, required: &DirtyState) -> bool {
+		match (self, required) {
+			(DirtyState::UpToDate, _) => true,
+			(_, DirtyState::UpToDate) => false,
+			(DirtyState::Dirty { tick: have }, DirtyState::Dirty { tick: need }) => *have >= *need,
+		}
+	}
+
+	pub fn is_fresher_than(&self, other: &DirtyState) -> bool {
+		match (self, other) {
+			(DirtyState::UpToDate, DirtyState::UpToDate) => false,
+			(DirtyState::UpToDate, _) => true,
+			(_, DirtyState::UpToDate) => false,
+			(DirtyState::Dirty { tick: a }, DirtyState::Dirty { tick: b }) => a > b,
+		}
+	}
 }
 
 pub struct Request<DT: DataType> {
@@ -46,7 +66,7 @@ pub trait DataConsumingNode<DT: DataType> {
 pub struct DataColumn<DT: DataType> {
 	data: HashMap<DT::Params, (DirtyState, DT::Data, HashSet<Entity>)>,
 	new_data: HashMap<DT::Params, HashSet<Entity>>,
-	waiting: HashMap<DT::Params, HashSet<Entity>>,
+	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
 }
 
 impl<DT: DataType> DataColumn<DT> {
@@ -61,13 +81,8 @@ pub struct DataRequester<'w, 's, DT: DataType> {
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		if let Some((dirty_state, data, usages)) = &mut self.data_column.data.get_mut(&request.params) {
-			if let DirtyState::Dirty { tick } = *dirty_state {
-				if let DirtyState::Dirty { tick: allowed_tick } = request.allowed_tick && tick >= allowed_tick {
-					usages.insert(requester_node);
-					return Some(data.clone());
-				}
-			} else {
+		if let Some((dirty_state, data, usages)) = self.data_column.data.get_mut(&request.params) {
+			if dirty_state.satisfies(&request.allowed_tick) {
 				usages.insert(requester_node);
 				return Some(data.clone());
 			}
@@ -76,7 +91,7 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 		let node_entity = Self::best_node(&self.data_producing_node, &request);
 		let mut node = self.data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
 		// update requester
-		self.data_column.waiting.entry(request.params.clone()).or_default().insert(requester_node);
+		self.data_column.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
 		// create queue
 		node.request(request);
 		None
@@ -127,7 +142,12 @@ pub struct DataPasser<'w, DT: DataType> {
 
 impl<'w, DT: DataType> DataPasser<'w, DT> {
 	pub fn pass_data(&mut self, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
+		if let Some((existing, _, _)) = self.data_column.data.get(params) && existing.is_fresher_than(&dirty_state) {
+			return;
+		}
+
 		let Some(waiting) = self.data_column.waiting.remove(params) else { return; /* No need to store data thats not wanted */ };
+
 		match self.data_column.data.entry(params.clone()) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
 				let (old_dirty_state, old_data, _usages) = entry.get_mut();
@@ -138,7 +158,19 @@ impl<'w, DT: DataType> DataPasser<'w, DT> {
 				entry.insert((dirty_state, data, HashSet::default()));
 			}
 		}
-		self.data_column.new_data.entry(params.clone()).or_default().extend(waiting);
+
+		let satisfied = self.data_column.new_data.entry(params.clone()).or_default();
+		let mut still_waiting = HashMap::default();
+		for (entity, required) in waiting {
+			if dirty_state.satisfies(&required) {
+				satisfied.insert(entity);
+			} else {
+				still_waiting.insert(entity, required);
+			}
+		}
+		if !still_waiting.is_empty() {
+			self.data_column.waiting.insert(params.clone(), still_waiting);
+		}
 	}
 }
 
