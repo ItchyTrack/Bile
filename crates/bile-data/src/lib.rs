@@ -99,7 +99,32 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	}
 
 	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
+		if let Some(waiting) = self.data_column.waiting.get_mut(params) {
+			waiting.remove(&requester_node);
+			if waiting.is_empty() {
+				self.data_column.waiting.remove(params);
+			}
+		}
+		let mut empty_finished = true;
+		if let Some(finished) = self.data_column.finished.get_mut(params) {
+			finished.remove(&requester_node);
+			if finished.is_empty() {
+				self.data_column.finished.remove(params);
+			} else {
+				empty_finished = false;
+			}
+		}
 
+		let Some((_, _, usages, source_entity)) = self.data_column.data.get_mut(params) else { return; };
+		usages.remove(&requester_node);
+
+		if usages.is_empty() && empty_finished {
+			let source_entity = *source_entity;
+			if !self.data_column.waiting.contains_key(params) {
+				self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
+				self.data_column.data.remove(params);
+			}
+		}
 	}
 
 	fn best_node(data_producing_node: &Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>, request: &Request<DT>) -> Entity {
@@ -204,6 +229,20 @@ pub fn pass_data<DT: DataType>(
 				match dirty_state { DirtyState::Dirty { tick } => *tick, _ => bile_state_tick.current_tick },
 				new_data.clone()
 			);
+		}
+	}
+}
+
+pub fn drop_data<DT: DataType>(
+	mut data_column: ResMut<DataColumn<DT>>,
+	mut data_producing_nodes: Query<One<&'static mut dyn DataProducingNode<DT>>>,
+) {
+	if data_column.data_to_drop.is_empty() { return; }
+
+	for (params, sources) in std::mem::replace(&mut data_column.data_to_drop, HashMap::default()) {
+		for source_entity in sources {
+			let Ok(mut node) = data_producing_nodes.get_mut(source_entity) else { continue; };
+			node.drop(&params);
 		}
 	}
 }
