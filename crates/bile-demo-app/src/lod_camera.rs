@@ -1,9 +1,9 @@
-use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*};
+use bevy::prelude::*;
 use bile_math::Region;
 use bile_region_loader::LodBand;
 use bile_scene::NodeBounds;
 
-use crate::{MainRenderingLoader, terrain::{TerrainClass, lod_color}};
+use crate::{grass::GrassLoader, terrain::{TerrainLoader, lod_color}};
 
 #[derive(Resource, Debug, Clone)]
 pub struct LodCameraSettings {
@@ -27,13 +27,13 @@ pub struct LodCamera;
 #[derive(Component)]
 struct LodCameraText;
 
-pub fn lod_bands_around(position: Vec3, tile_size: u32, class: ComponentId, settings: &LodCameraSettings) -> Vec<LodBand> {
+pub fn lod_bands_around(position: Vec3, tile_size: u32, settings: &LodCameraSettings) -> Vec<LodBand> {
 	let center = (position / tile_size as f32).round().as_ivec3();
 	let radius = settings.near_radius_tiles as i32;
 	let to_region = |(min, max): (IVec3, IVec3)| Region::from_min_end(min * tile_size as i32, max * tile_size as i32).unwrap();
 
 	let near = align_bounds(center - radius, center + radius + 1, 2);
-	let mut bands = vec![LodBand { class, lod: 0, outer: to_region(near), inner: None }];
+	let mut bands = vec![LodBand { lod: 0, outer: to_region(near), inner: None }];
 	let mut previous = near;
 	for lod in 1..=settings.max_lod {
 		let expand = IVec3::splat((1 << lod) * settings.rings_per_lod as i32);
@@ -41,7 +41,7 @@ pub fn lod_bands_around(position: Vec3, tile_size: u32, class: ComponentId, sett
 		if lod < settings.max_lod {
 			outer = align_bounds(outer.0, outer.1, 1 << (lod + 1));
 		}
-		bands.push(LodBand { class, lod, outer: to_region(outer), inner: Some(to_region(previous)) });
+		bands.push(LodBand { lod, outer: to_region(outer), inner: Some(to_region(previous)) });
 		previous = outer;
 	}
 	bands
@@ -53,16 +53,16 @@ fn align_bounds(min: IVec3, max: IVec3, size: i32) -> (IVec3, IVec3) {
 
 fn set_loader_regions(
 	settings: Res<LodCameraSettings>,
-	terrain_class: ComponentIdFor<TerrainClass>,
 	cameras: Query<&GlobalTransform, With<LodCamera>>,
-	mut loaders: Query<(&GlobalTransform, &mut MainRenderingLoader)>,
+	mut loaders: Query<(&GlobalTransform, &mut TerrainLoader, &mut GrassLoader)>,
 ) {
 	if settings.frozen { return; }
 	let Ok(camera) = cameras.single() else { return };
-	for (loader_transform, mut loader) in &mut loaders {
+	for (loader_transform, mut terrain, mut grass) in &mut loaders {
 		let local = loader_transform.affine().inverse().transform_point3(camera.translation());
-		let bands = lod_bands_around(local, loader.tile_size(), terrain_class.get(), &settings);
-		loader.set_regions(bands);
+		let bands = lod_bands_around(local, terrain.tile_size(), &settings);
+		grass.set_regions(bands[..1].to_vec());
+		terrain.set_regions(bands);
 	}
 }
 
@@ -74,7 +74,7 @@ fn handle_input(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<LodCameraS
 
 fn draw_regions(
 	settings: Res<LodCameraSettings>,
-	loaders: Query<(&GlobalTransform, &NodeBounds, &MainRenderingLoader)>,
+	loaders: Query<(&GlobalTransform, &NodeBounds, &TerrainLoader)>,
 	mut gizmos: Gizmos,
 ) {
 	for (transform, node_bounds, loader) in &loaders {
@@ -86,7 +86,7 @@ fn draw_regions(
 		}
 		if settings.show_pending_tiles {
 			for key in loader.pending_tiles() {
-				gizmos.cube(*transform * region_transform(key.tile_key.region.into()), Color::WHITE);
+				gizmos.cube(*transform * region_transform(key.region.into()), Color::WHITE);
 			}
 		}
 	}
@@ -99,7 +99,7 @@ fn region_transform(region: Region) -> Transform {
 
 fn update_text(
 	settings: Res<LodCameraSettings>,
-	loaders: Query<&MainRenderingLoader>,
+	loaders: Query<&TerrainLoader>,
 	mut texts: Query<&mut Text, With<LodCameraText>>,
 ) {
 	let (mut desired, mut loaded, mut pending) = (0, 0, 0);

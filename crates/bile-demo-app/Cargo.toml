@@ -10,9 +10,9 @@ gpu_profiling = []
 [dependencies]
 bevy = { workspace = true, features = ["free_camera"] }
 bevy-trait-query = { workspace = true }
-crossbeam-channel = { workspace = true }
 fastnoise-lite = "1.1.1"
 bile = { workspace = true }
+bile-data = { workspace = true }
 bile-math = { workspace = true }
 bile-scene = { workspace = true }
 bile-tiles = { workspace = true }

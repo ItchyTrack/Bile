@@ -1,17 +1,19 @@
 mod coverage;
-mod key;
 mod lod_bands;
 mod region_loader;
 mod systems;
 mod tile_lifecycle;
+#[cfg(test)]
+mod tests;
 
 use std::marker::PhantomData;
 
-use bevy::prelude::*;
+use bevy::{prelude::*, transform::TransformSystems};
+use bevy_trait_query::RegisterExt;
+use bile_data::{DataConsumingNode, DataRequester, DataType, DirtyState, Request};
 use bile_math::NonZeroRegion;
-use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, TileInstances};
+use bile_tiles::TileKey;
 
-pub use crate::key::TileClassKey;
 pub use crate::lod_bands::LodBand;
 pub use crate::region_loader::RegionLoader;
 
@@ -21,62 +23,71 @@ pub struct RegionUpdated {
 	pub region: NonZeroRegion,
 }
 
+pub trait TileContent: Clone + Send + Sync + 'static {
+	fn spawn(self, commands: &mut Commands, loader: Entity) -> Option<Entity>;
+}
+
+impl<B: Bundle + Clone> TileContent for Option<B> {
+	fn spawn(self, commands: &mut Commands, loader: Entity) -> Option<Entity> {
+		Some(commands.spawn((self?, ChildOf(loader))).id())
+	}
+}
+
 #[derive(Component, Deref, DerefMut)]
-#[require(TileInstances)]
-pub struct RegionLoaderComponent<M: 'static> {
+pub struct RegionLoaderComponent<DT: DataType> {
 	#[deref]
 	loader: RegionLoader,
-	marker: PhantomData<fn() -> M>,
+	received: Vec<(TileKey, DT::Data)>,
 }
 
-impl<M: 'static> RegionLoaderComponent<M> {
+impl<DT: DataType> RegionLoaderComponent<DT> {
 	pub fn new(tile_size: u32) -> Self {
-		Self::from_loader(RegionLoader::new(tile_size))
-	}
-	pub fn from_loader(loader: RegionLoader) -> Self {
-		Self { loader, marker: PhantomData }
-	}
-	pub fn into_inner(self) -> RegionLoader {
-		self.loader
+		Self { loader: RegionLoader::new(tile_size), received: Vec::new() }
 	}
 }
 
-impl<M: 'static> std::fmt::Debug for RegionLoaderComponent<M> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple(std::any::type_name::<Self>()).field(&self.loader).finish()
+impl<DT: DataType<Params = TileKey>> RegionLoaderComponent<DT> where DT::Data: TileContent {
+	fn flush(&mut self, entity: Entity, commands: &mut Commands, requester: &mut DataRequester<DT>) {
+		for key in self.loader.take_acquired() {
+			if let Some(data) = requester.request(Request::new(key, DirtyState::UpToDate), entity) {
+				self.received.push((key, data));
+			}
+		}
+		for (key, data) in std::mem::take(&mut self.received) {
+			if !self.loader.is_requested(key) { continue; }
+			let tile_entity = data.spawn(commands, entity);
+			self.loader.tile_loaded(key, tile_entity);
+		}
+		for (key, resolution) in self.loader.take_released() {
+			requester.cancel(&key, entity);
+			if let Some(tile_entity) = resolution.entity() {
+				commands.entity(tile_entity).try_despawn();
+			}
+		}
 	}
 }
 
-pub struct RegionLoaderPlugin<M: 'static>(PhantomData<fn() -> M>);
+impl<DT: DataType<Params = TileKey>> DataConsumingNode<DT> for RegionLoaderComponent<DT> {
+	fn pass_data(&mut self, params: &TileKey, _tick: u64, data: DT::Data) {
+		self.received.push((*params, data));
+	}
+	fn dirty_data(&mut self, _params: &TileKey, _last_clean_tick: u64) {}
+}
 
-impl<M: 'static> Default for RegionLoaderPlugin<M> {
+pub struct RegionLoaderPlugin<DT>(PhantomData<fn() -> DT>);
+
+impl<DT> Default for RegionLoaderPlugin<DT> {
 	fn default() -> Self {
 		Self(PhantomData)
 	}
 }
 
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RegionLoaderSystemSet {
-	Receive,
-	Update,
-}
-
-impl<M: 'static> Plugin for RegionLoaderPlugin<M> {
+impl<DT: DataType<Params = TileKey>> Plugin for RegionLoaderPlugin<DT> where DT::Data: TileContent {
 	fn build(&self, app: &mut App) {
 		app.add_message::<RegionUpdated>()
-			.configure_sets(
-				BileTilesSchedule,
-				(RegionLoaderSystemSet::Receive, RegionLoaderSystemSet::Update)
-					.chain()
-					.in_set(BileTilesSystemSet::UpdateWantedClasses),
-			)
-			.add_systems(
-				BileTilesSchedule,
-				(
-					(systems::receive_ready_classes::<M>, systems::receive_region_updates::<M>).in_set(RegionLoaderSystemSet::Receive),
-					systems::update_requests::<M>.in_set(RegionLoaderSystemSet::Update),
-				),
-			)
-			.add_observer(systems::release_removed_loader::<M>);
+			.init_resource::<systems::RemovedLoaderTiles<DT>>()
+			.register_component_as::<dyn DataConsumingNode<DT>, RegionLoaderComponent<DT>>()
+			.add_systems(PostUpdate, systems::update_loaders::<DT>.before(TransformSystems::Propagate))
+			.add_observer(systems::release_removed_loader::<DT>);
 	}
 }

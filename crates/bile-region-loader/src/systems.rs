@@ -1,42 +1,56 @@
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
+use bile_data::{DataRequester, DataType};
 use bile_scene::NodeBounds;
-use bile_tiles::{TileClassReady, TileInstances};
+use bile_tiles::TileKey;
 
-use crate::{RegionLoaderComponent, RegionUpdated};
+use crate::{RegionLoaderComponent, RegionUpdated, TileContent};
 
-pub(crate) fn receive_ready_classes<M: 'static>(
-	mut ready_classes: MessageReader<TileClassReady>,
-	mut loaders: Query<(&mut RegionLoaderComponent<M>, &mut TileInstances)>,
-) {
-	for ready in ready_classes.read() {
-		let Ok((mut loader, mut tile_instances)) = loaders.get_mut(ready.entity) else { continue };
-		loader.tile_class_ready(&mut tile_instances, ready.tile_key, ready.class, ready.tile_entity);
+#[derive(Resource)]
+pub(crate) struct RemovedLoaderTiles<DT> {
+	tiles: Vec<(Entity, TileKey)>,
+	marker: PhantomData<fn() -> DT>,
+}
+
+impl<DT> Default for RemovedLoaderTiles<DT> {
+	fn default() -> Self {
+		Self { tiles: Vec::new(), marker: PhantomData }
 	}
 }
 
-pub(crate) fn receive_region_updates<M: 'static>(
+pub(crate) fn update_loaders<DT: DataType<Params = TileKey>>(
+	mut commands: Commands,
+	mut requester: DataRequester<DT>,
 	mut region_updates: MessageReader<RegionUpdated>,
-	mut loaders: Query<(&mut RegionLoaderComponent<M>, &mut TileInstances, &NodeBounds)>,
-) {
+	mut removed: ResMut<RemovedLoaderTiles<DT>>,
+	mut loaders: Query<(Entity, &mut RegionLoaderComponent<DT>, &NodeBounds)>,
+) where DT::Data: TileContent {
+	for (entity, key) in removed.tiles.drain(..) {
+		requester.cancel(&key, entity);
+	}
 	for update in region_updates.read() {
-		let Ok((mut loader, mut tile_instances, node_bounds)) = loaders.get_mut(update.entity) else { continue };
-		loader.region_updated(&mut tile_instances, node_bounds, update.region);
+		let Ok((_, mut loader, node_bounds)) = loaders.get_mut(update.entity) else { continue };
+		loader.region_updated(node_bounds, update.region);
+	}
+	for (entity, mut loader, node_bounds) in &mut loaders {
+		loader.update(node_bounds);
+		loader.flush(entity, &mut commands, &mut requester);
 	}
 }
 
-pub(crate) fn update_requests<M: 'static>(
-	mut loaders: Query<(&mut RegionLoaderComponent<M>, &mut TileInstances, &NodeBounds)>,
+pub(crate) fn release_removed_loader<DT: DataType<Params = TileKey>>(
+	remove: On<Remove, RegionLoaderComponent<DT>>,
+	mut commands: Commands,
+	mut removed: ResMut<RemovedLoaderTiles<DT>>,
+	mut loaders: Query<&mut RegionLoaderComponent<DT>>,
 ) {
-	for (mut loader, mut tile_instances, node_bounds) in &mut loaders {
-		if !loader.has_pending_regions() { continue; }
-		loader.update(&mut tile_instances, node_bounds);
+	let Ok(mut loader) = loaders.get_mut(remove.entity) else { return };
+	loader.clear();
+	for (key, resolution) in loader.take_released() {
+		removed.tiles.push((remove.entity, key));
+		if let Some(tile_entity) = resolution.entity() {
+			commands.entity(tile_entity).try_despawn();
+		}
 	}
-}
-
-pub(crate) fn release_removed_loader<M: 'static>(
-	remove: On<Remove, RegionLoaderComponent<M>>,
-	mut loaders: Query<(&mut RegionLoaderComponent<M>, &mut TileInstances)>,
-) {
-	let Ok((mut loader, mut tile_instances)) = loaders.get_mut(remove.entity) else { return };
-	loader.clear(&mut tile_instances);
 }

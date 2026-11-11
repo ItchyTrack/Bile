@@ -9,8 +9,10 @@ tracy = ["tracy-client/enable"]
 
 [dependencies]
 bevy = { workspace = true }
+bevy-trait-query = { workspace = true }
 tracy-client = { workspace = true }
 bile-math = { workspace = true }
+bile-data = { workspace = true }
 bile-tiles = { workspace = true }
 bile-scene = { workspace = true }
 
