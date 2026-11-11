@@ -267,9 +267,9 @@ pub struct BileDataSchedule;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BileDataSystemSet {
-	UpdateStateTick,
-	PassData,
 	DropData,
+	PassData,
+	UpdateStateTick,
 }
 
 pub trait BileAddDataType {
@@ -298,9 +298,9 @@ impl Plugin for BileDataPlugin {
 		app.configure_sets(
 			BileDataSchedule,
 			(
-				BileDataSystemSet::UpdateStateTick,
-				BileDataSystemSet::PassData,
 				BileDataSystemSet::DropData,
+				BileDataSystemSet::PassData,
+				BileDataSystemSet::UpdateStateTick,
 			).chain(),
 		);
 
