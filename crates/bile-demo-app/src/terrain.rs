@@ -1,19 +1,23 @@
+use std::{collections::{HashMap, HashSet}, sync::Arc};
+
 use bevy::{
 	asset::RenderAssetUsages,
 	ecs::component::ComponentIdFor,
 	mesh::{Indices, PrimitiveTopology},
 	prelude::*,
+	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
+use bevy_trait_query::RegisterExt;
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::DataType;
+use bile_data::{DataConsumingNode, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
 
-use crate::{MainRenderingLoader, heightmap::{AddHeightmapMesh, HeightmapMesh, Heights}};
+use crate::{MainRenderingLoader, heightmap::{Heightmap, HeightmapParams, Heights}};
 
 pub const TILE_SIZE: u32 = 64;
-const TILE_QUADS: usize = crate::heightmap::TILE_QUADS as usize;
+const TILE_QUADS: usize = 32;
 const TERRAIN_HALF_WIDTH: i32 = 32768;
 const TERRAIN_HALF_HEIGHT: i32 = 256;
 
@@ -44,13 +48,82 @@ impl ComponentData for TerrainMesh {
 	type Component = Mesh3d;
 }
 
-impl HeightmapMesh for TerrainMesh {
-	fn build(tile_key: TileKey, heights: &Heights) -> Option<Mesh> {
-		build_tile_mesh(heights, tile_key)
+#[derive(Component, Default)]
+struct TerrainMeshNode {
+	tiles: HashMap<HeightmapParams, HashSet<TileKey>>,
+	requested: Vec<TileKey>,
+	waiting: HashSet<TileKey>,
+	unused: Vec<HeightmapParams>,
+	ready: Vec<(TileKey, Arc<Heights>)>,
+	building: Vec<(TileKey, Task<Option<Mesh>>)>,
+}
+
+impl DataProducingNode<TerrainMesh> for TerrainMeshNode {
+	fn cost(&self, _request: &Request<TerrainMesh>) -> Option<f32> { Some(1.0) }
+
+	fn request(&mut self, request: Request<TerrainMesh>) {
+		self.tiles.entry(heightmap_params(request.params)).or_default().insert(request.params);
+		self.requested.push(request.params);
 	}
-	fn component(mesh: Handle<Mesh>) -> Mesh3d {
-		Mesh3d(mesh)
+
+	fn drop(&mut self, tile_key: &TileKey) {
+		let params = heightmap_params(*tile_key);
+		if let Some(tiles) = self.tiles.get_mut(&params) && tiles.remove(tile_key) && tiles.is_empty() {
+			self.tiles.remove(&params);
+			self.unused.push(params);
+		}
+		self.waiting.remove(tile_key);
+		self.ready.retain(|(key, _)| key != tile_key);
+		self.building.retain(|(key, _)| key != tile_key);
 	}
+}
+
+impl DataConsumingNode<Heightmap> for TerrainMeshNode {
+	fn pass_data(&mut self, params: &HeightmapParams, _tick: u64, heights: Arc<Heights>) {
+		let Some(tiles) = self.tiles.get(params) else { return };
+		for &tile_key in tiles {
+			if self.waiting.remove(&tile_key) {
+				self.ready.push((tile_key, heights.clone()));
+			}
+		}
+	}
+
+	fn dirty_data(&mut self, _params: &HeightmapParams, _last_clean_tick: u64) {}
+}
+
+fn update_terrain_meshes(
+	node: Single<(Entity, &mut TerrainMeshNode)>,
+	mut heightmaps: DataRequester<Heightmap>,
+	mut passer: DataPasser<TerrainMesh>,
+	mut meshes: ResMut<Assets<Mesh>>,
+) {
+	let (entity, mut node) = node.into_inner();
+	let node = &mut *node;
+	for tile_key in std::mem::take(&mut node.requested) {
+		let params = heightmap_params(tile_key);
+		if !node.tiles.get(&params).is_some_and(|tiles| tiles.contains(&tile_key)) { continue; }
+		match heightmaps.request(Request::new(params, DirtyState::UpToDate), entity) {
+			Some(heights) => node.ready.push((tile_key, heights)),
+			None => { node.waiting.insert(tile_key); }
+		}
+	}
+	for params in std::mem::take(&mut node.unused) {
+		if !node.tiles.contains_key(&params) {
+			heightmaps.cancel(&params, entity);
+		}
+	}
+	for (tile_key, heights) in node.ready.drain(..) {
+		node.building.push((tile_key, AsyncComputeTaskPool::get().spawn(async move { build_tile_mesh(&heights, tile_key) })));
+	}
+	for (tile_key, task) in node.building.extract_if(.., |(_, task)| task.is_finished()) {
+		let component = block_on(task).map(|mesh| Mesh3d(meshes.add(mesh)));
+		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, component);
+	}
+}
+
+fn heightmap_params(tile_key: TileKey) -> HeightmapParams {
+	let step = tile_key.size().x / TILE_QUADS as u32;
+	HeightmapParams { min: tile_key.min().xz() - step as i32, samples: UVec2::splat(TILE_QUADS as u32 + 3), step }
 }
 
 fn build_tile_mesh(heights: &Heights, tile_key: TileKey) -> Option<Mesh> {
@@ -141,10 +214,13 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
 	fn build(&self, app: &mut App) {
 		app.world_mut().register_component::<TerrainClass>();
+		app.world_mut().spawn(TerrainMeshNode::default());
 		app.register_tile_class::<TerrainClass>()
 			.add_component_data::<TerrainMesh>()
-			.add_heightmap_mesh::<TerrainMesh>()
+			.register_component_as::<dyn DataProducingNode<TerrainMesh>, TerrainMeshNode>()
+			.register_component_as::<dyn DataConsumingNode<Heightmap>, TerrainMeshNode>()
 			.add_systems(Startup, spawn_terrain)
+			.add_systems(Update, update_terrain_meshes)
 			.add_systems(PostUpdate, add_terrain_materials)
 			.add_systems(BileTilesSchedule, decide_terrain_components.in_set(BileTilesSystemSet::UpdateWantedComponents));
 	}

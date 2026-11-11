@@ -1,15 +1,20 @@
+use std::{collections::{HashMap, HashSet}, sync::Arc};
+
 use bevy::{
 	asset::RenderAssetUsages,
 	ecs::component::ComponentIdFor,
 	mesh::{Indices, PrimitiveTopology},
 	prelude::*,
+	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
+use bevy_trait_query::RegisterExt;
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::DataType;
+use bile_data::{DataConsumingNode, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
-use crate::{heightmap::{AddHeightmapMesh, HeightmapMesh, Heights}, terrain::TerrainClass};
+use crate::{heightmap::{Heightmap, HeightmapParams, Heights}, terrain::TerrainClass};
 
+const HEIGHT_QUADS: u32 = 32;
 const BLADES_PER_TILE: u32 = 6000;
 const BLADE_HEIGHT: f32 = 0.9;
 const BLADE_WIDTH: f32 = 0.12;
@@ -34,13 +39,82 @@ impl ComponentData for GrassMesh {
 	type Component = Grass;
 }
 
-impl HeightmapMesh for GrassMesh {
-	fn build(tile_key: TileKey, heights: &Heights) -> Option<Mesh> {
-		build_grass_mesh(heights, tile_key)
+#[derive(Component, Default)]
+struct GrassMeshNode {
+	tiles: HashMap<HeightmapParams, HashSet<TileKey>>,
+	requested: Vec<TileKey>,
+	waiting: HashSet<TileKey>,
+	unused: Vec<HeightmapParams>,
+	ready: Vec<(TileKey, Arc<Heights>)>,
+	building: Vec<(TileKey, Task<Option<Mesh>>)>,
+}
+
+impl DataProducingNode<GrassMesh> for GrassMeshNode {
+	fn cost(&self, _request: &Request<GrassMesh>) -> Option<f32> { Some(1.0) }
+
+	fn request(&mut self, request: Request<GrassMesh>) {
+		self.tiles.entry(heightmap_params(request.params)).or_default().insert(request.params);
+		self.requested.push(request.params);
 	}
-	fn component(mesh: Handle<Mesh>) -> Grass {
-		Grass(mesh)
+
+	fn drop(&mut self, tile_key: &TileKey) {
+		let params = heightmap_params(*tile_key);
+		if let Some(tiles) = self.tiles.get_mut(&params) && tiles.remove(tile_key) && tiles.is_empty() {
+			self.tiles.remove(&params);
+			self.unused.push(params);
+		}
+		self.waiting.remove(tile_key);
+		self.ready.retain(|(key, _)| key != tile_key);
+		self.building.retain(|(key, _)| key != tile_key);
 	}
+}
+
+impl DataConsumingNode<Heightmap> for GrassMeshNode {
+	fn pass_data(&mut self, params: &HeightmapParams, _tick: u64, heights: Arc<Heights>) {
+		let Some(tiles) = self.tiles.get(params) else { return };
+		for &tile_key in tiles {
+			if self.waiting.remove(&tile_key) {
+				self.ready.push((tile_key, heights.clone()));
+			}
+		}
+	}
+
+	fn dirty_data(&mut self, _params: &HeightmapParams, _last_clean_tick: u64) {}
+}
+
+fn update_grass_meshes(
+	node: Single<(Entity, &mut GrassMeshNode)>,
+	mut heightmaps: DataRequester<Heightmap>,
+	mut passer: DataPasser<GrassMesh>,
+	mut meshes: ResMut<Assets<Mesh>>,
+) {
+	let (entity, mut node) = node.into_inner();
+	let node = &mut *node;
+	for tile_key in std::mem::take(&mut node.requested) {
+		let params = heightmap_params(tile_key);
+		if !node.tiles.get(&params).is_some_and(|tiles| tiles.contains(&tile_key)) { continue; }
+		match heightmaps.request(Request::new(params, DirtyState::UpToDate), entity) {
+			Some(heights) => node.ready.push((tile_key, heights)),
+			None => { node.waiting.insert(tile_key); }
+		}
+	}
+	for params in std::mem::take(&mut node.unused) {
+		if !node.tiles.contains_key(&params) {
+			heightmaps.cancel(&params, entity);
+		}
+	}
+	for (tile_key, heights) in node.ready.drain(..) {
+		node.building.push((tile_key, AsyncComputeTaskPool::get().spawn(async move { build_grass_mesh(&heights, tile_key) })));
+	}
+	for (tile_key, task) in node.building.extract_if(.., |(_, task)| task.is_finished()) {
+		let component = block_on(task).map(|mesh| Grass(meshes.add(mesh)));
+		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, component);
+	}
+}
+
+fn heightmap_params(tile_key: TileKey) -> HeightmapParams {
+	let step = tile_key.size().x / HEIGHT_QUADS;
+	HeightmapParams { min: tile_key.min().xz() - step as i32, samples: UVec2::splat(HEIGHT_QUADS + 3), step }
 }
 
 fn hash(mut x: u32) -> u32 {
@@ -135,9 +209,12 @@ pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
 	fn build(&self, app: &mut App) {
+		app.world_mut().spawn(GrassMeshNode::default());
 		app.add_component_data::<GrassMesh>()
-			.add_heightmap_mesh::<GrassMesh>()
+			.register_component_as::<dyn DataProducingNode<GrassMesh>, GrassMeshNode>()
+			.register_component_as::<dyn DataConsumingNode<Heightmap>, GrassMeshNode>()
 			.add_systems(Startup, setup_grass_material)
+			.add_systems(Update, update_grass_meshes)
 			.add_systems(PostUpdate, spawn_grass_blades)
 			.add_observer(despawn_grass_blades)
 			.add_systems(BileTilesSchedule, decide_grass_components.in_set(BileTilesSystemSet::UpdateWantedComponents));
