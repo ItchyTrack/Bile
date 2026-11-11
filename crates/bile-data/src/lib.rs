@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, hash::Hash};
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{app::MainScheduleOrder, ecs::{schedule::ScheduleLabel, system::SystemParam}, prelude::*};
 use bevy_trait_query::One;
 
 #[derive(Resource, Default)]
@@ -62,12 +62,23 @@ pub trait DataConsumingNode<DT: DataType> {
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64); // will be passed the diff later
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct DataColumn<DT: DataType> {
 	data: HashMap<DT::Params, (DirtyState, DT::Data, HashSet<Entity>, Entity)>,
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>, // this data is no longer requested from this Entity. Either no one wants it or something else provided it.
 	finished: HashMap<DT::Params, HashSet<Entity>>,
 	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
+}
+
+impl<DT: DataType> Default for DataColumn<DT> {
+	fn default() -> Self {
+		Self {
+			data: HashMap::default(),
+			data_to_drop: HashMap::default(),
+			finished: HashMap::default(),
+			waiting: HashMap::default(),
+		}
+	}
 }
 
 impl<DT: DataType> DataColumn<DT> {
@@ -244,5 +255,55 @@ pub fn drop_data<DT: DataType>(
 			let Ok(mut node) = data_producing_nodes.get_mut(source_entity) else { continue; };
 			node.drop(&params);
 		}
+	}
+}
+
+fn update_bile_state_tick(mut bile_state_tick: ResMut<StateTick>) {
+	bile_state_tick.current_tick += 1;
+}
+
+#[derive(ScheduleLabel, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BileDataSchedule;
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BileDataSystemSet {
+	UpdateStateTick,
+	PassData,
+	DropData,
+}
+
+pub trait BileAddDataType {
+	fn bile_add_data_type<DT: DataType>(&mut self);
+}
+
+impl BileAddDataType for App {
+	fn bile_add_data_type<DT: DataType>(&mut self) {
+		self.add_systems(BileDataSchedule, (
+			pass_data::<DT>.in_set(BileDataSystemSet::PassData),
+			drop_data::<DT>.in_set(BileDataSystemSet::DropData),
+		));
+		self.init_resource::<DataColumn<DT>>();
+	}
+}
+
+pub struct BileDataPlugin {}
+
+impl Plugin for BileDataPlugin {
+	fn build(&self, app: &mut App) {
+		app.init_schedule(BileDataSchedule);
+		app.world_mut()
+			.resource_mut::<MainScheduleOrder>()
+			.insert_after(Update, BileDataSchedule);
+
+		app.configure_sets(
+			BileDataSchedule,
+			(
+				BileDataSystemSet::UpdateStateTick,
+				BileDataSystemSet::PassData,
+				BileDataSystemSet::DropData,
+			).chain(),
+		);
+
+		app.add_systems(BileDataSchedule, update_bile_state_tick.in_set(BileDataSystemSet::UpdateStateTick));
 	}
 }
