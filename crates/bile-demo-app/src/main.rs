@@ -27,24 +27,21 @@ fn main() {
 }
 
 fn scene() -> impl SceneList {
-	bsn_list! [
-		(
-			DirectionalLight {
-				illuminance: 8000.0,
-			}
-			template_value(Transform::from_xyz(1.0, 2.0, 0.5).looking_at(Vec3::ZERO, Vec3::Y))
-		),
-		(
-			Camera3d
-			lod_camera::LodCamera
-			template_value(FreeCamera { walk_speed: 60.0, run_speed: 600.0, ..default() })
-			template_value(Projection::Perspective(PerspectiveProjection { far: 100_000.0, ..default() }))
-			template_value(DistanceFog {
-				color: Color::srgb(0.6, 0.75, 0.9),
-				falloff: FogFalloff::Linear { start: 4000.0, end: 30000.0 },
-				..default()
-			})
-			template_value(Transform::from_xyz(0.0, 250.0, 0.0).looking_at(Vec3::new(400.0, 0.0, 400.0), Vec3::Y))
-		)
-	]
+	bsn_list! {
+		DirectionalLight {
+			illuminance: 8000.0,
+		}
+		~{Transform::from_xyz(1.0, 2.0, 0.5).looking_at(Vec3::ZERO, Vec3::Y)}
+		--
+		Camera3d
+		lod_camera::LodCamera
+		~{FreeCamera { walk_speed: 60.0, run_speed: 600.0, ..default() }}
+		~{Projection::Perspective(PerspectiveProjection { far: 100_000.0, ..default() })}
+		~{DistanceFog {
+			color: Color::srgb(0.6, 0.75, 0.9),
+			falloff: FogFalloff::Linear { start: 4000.0, end: 30000.0 },
+			..default()
+		}}
+		~{Transform::from_xyz(0.0, 250.0, 0.0).looking_at(Vec3::new(400.0, 0.0, 400.0), Vec3::Y)}
+	}
 }

@@ -111,7 +111,7 @@ impl<DT: ComponentData> Default for RemovedWants<DT> {
 	}
 }
 
-fn queue_removed_want<DT: ComponentData>(remove: On<Remove, Want<DT>>, wants: Query<&Want<DT>>, mut removed: ResMut<RemovedWants<DT>>) {
+fn queue_removed_want<DT: ComponentData>(remove: On<Remove<Want<DT>>>, wants: Query<&Want<DT>>, mut removed: ResMut<RemovedWants<DT>>) {
 	let Ok(want) = wants.get(remove.entity) else { return };
 	removed.removed.push((remove.entity, want.params.clone()));
 }

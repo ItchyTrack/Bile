@@ -34,7 +34,7 @@ pub(crate) fn update_requests<M: 'static>(
 }
 
 pub(crate) fn release_removed_loader<M: 'static>(
-	remove: On<Remove, RegionLoaderComponent<M>>,
+	remove: On<Remove<RegionLoaderComponent<M>>>,
 	mut loaders: Query<(&mut RegionLoaderComponent<M>, &mut TileInstances)>,
 ) {
 	let Ok((mut loader, mut tile_instances)) = loaders.get_mut(remove.entity) else { return };
