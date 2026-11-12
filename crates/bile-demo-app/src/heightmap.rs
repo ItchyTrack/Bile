@@ -1,14 +1,15 @@
-use std::sync::Arc;
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
 use bevy_trait_query::RegisterExt;
-use bile_data::{BileAddDataType, DataPasser, DataProducingNode, DataType, DirtyState, Request};
+use bile_data::{BileAddDataType, DataDirtier, DataPasser, DataProducingNode, DataType, DirtyState, Request};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
 pub const HEIGHTMAP_QUADS: usize = 32;
 const SAMPLES: usize = HEIGHTMAP_QUADS + 3;
 const TERRAIN_AMPLITUDE: f32 = 160.0;
+const OVERRIDE_STEP: f32 = 2.0;
 
 pub struct Heights {
 	min: Vec2,
@@ -33,6 +34,66 @@ impl Heights {
 	}
 }
 
+#[derive(Clone)]
+struct HeightSampler {
+	noise: Arc<FastNoiseLite>,
+	overrides: Arc<HashMap<IVec2, f32>>,
+}
+
+impl HeightSampler {
+	fn height(&self, position: Vec2) -> f32 {
+		self.noise.get_noise_2d(position.x, position.y) * TERRAIN_AMPLITUDE + self.offset(position)
+	}
+
+	fn offset(&self, position: Vec2) -> f32 {
+		if self.overrides.is_empty() { return 0.0; }
+		let local = position / OVERRIDE_STEP;
+		let cell = local.floor();
+		let t = local - cell;
+		let cell = cell.as_ivec2();
+		let at = |x: i32, y: i32| self.overrides.get(&(cell + IVec2::new(x, y))).copied().unwrap_or(0.0);
+		at(0, 0).lerp(at(1, 0), t.x).lerp(at(0, 1).lerp(at(1, 1), t.x), t.y)
+	}
+
+	fn heights(&self, tile_key: TileKey) -> Heights {
+		let step = tile_key.size().x as f32 / HEIGHTMAP_QUADS as f32;
+		let min = tile_key.min().xz().as_vec2() - step;
+		let values = (0..SAMPLES)
+			.flat_map(|j| (0..SAMPLES).map(move |i| min + Vec2::new(i as f32, j as f32) * step))
+			.map(|position| self.height(position))
+			.collect();
+		Heights { min, step, values }
+	}
+}
+
+#[derive(Resource)]
+pub struct HeightField {
+	sampler: HeightSampler,
+	edited: Vec<Rect>,
+}
+
+impl HeightField {
+	pub fn height(&self, position: Vec2) -> f32 {
+		self.sampler.height(position)
+	}
+
+	pub fn raise(&mut self, center: Vec2, radius: f32, amount: f32) {
+		let overrides = Arc::make_mut(&mut self.sampler.overrides);
+		let min = ((center - radius) / OVERRIDE_STEP).floor().as_ivec2();
+		let max = ((center + radius) / OVERRIDE_STEP).ceil().as_ivec2();
+		for y in min.y..=max.y {
+			for x in min.x..=max.x {
+				let cell = IVec2::new(x, y);
+				let distance = (cell.as_vec2() * OVERRIDE_STEP).distance(center) / radius;
+				if distance >= 1.0 { continue; }
+				let falloff = 1.0 - distance * distance;
+				*overrides.entry(cell).or_default() += amount * falloff * falloff;
+			}
+		}
+		self.edited.push(Rect::from_center_half_size(center, Vec2::splat(radius + OVERRIDE_STEP)));
+	}
+}
+
 pub struct Heightmap;
 
 impl DataType for Heightmap {
@@ -42,29 +103,56 @@ impl DataType for Heightmap {
 
 #[derive(Component)]
 struct HeightmapSource {
-	noise: Arc<FastNoiseLite>,
+	sampler: HeightSampler,
+	live: HashSet<TileKey>,
 	tasks: Vec<(TileKey, Task<Heights>)>,
+}
+
+impl HeightmapSource {
+	fn spawn(&mut self, tile_key: TileKey) {
+		let sampler = self.sampler.clone();
+		self.tasks.push((tile_key, AsyncComputeTaskPool::get().spawn(async move { sampler.heights(tile_key) })));
+	}
 }
 
 impl DataProducingNode<Heightmap> for HeightmapSource {
 	fn cost(&self, _request: &Request<Heightmap>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<Heightmap>) {
-		let noise = self.noise.clone();
-		let tile_key = request.params;
-		self.tasks.push((tile_key, AsyncComputeTaskPool::get().spawn(async move {
-			let step = tile_key.size().x as f32 / HEIGHTMAP_QUADS as f32;
-			let min = tile_key.min().xz().as_vec2() - step;
-			let values = (0..SAMPLES)
-				.flat_map(|j| (0..SAMPLES).map(move |i| min + Vec2::new(i as f32, j as f32) * step))
-				.map(|position| noise.get_noise_2d(position.x, position.y) * TERRAIN_AMPLITUDE)
-				.collect();
-			Heights { min, step, values }
-		})));
+		self.live.insert(request.params);
+		self.tasks.retain(|(task_tile_key, _)| *task_tile_key != request.params);
+		self.spawn(request.params);
 	}
 
 	fn drop(&mut self, tile_key: &TileKey) {
+		self.live.remove(tile_key);
 		self.tasks.retain(|(task_tile_key, _)| task_tile_key != tile_key);
+	}
+}
+
+fn footprint(tile_key: TileKey) -> Rect {
+	let step = tile_key.size().x as f32 / HEIGHTMAP_QUADS as f32;
+	let min = tile_key.min().xz().as_vec2() - step;
+	Rect::from_corners(min, min + (SAMPLES - 1) as f32 * step)
+}
+
+fn apply_height_edits(
+	mut field: ResMut<HeightField>,
+	source: Single<&mut HeightmapSource>,
+	mut dirtier: DataDirtier<Heightmap>,
+) {
+	if field.edited.is_empty() { return; }
+	let edited = std::mem::take(&mut field.edited);
+	let mut source = source.into_inner();
+	source.sampler = field.sampler.clone();
+	let touched = |tile_key: &TileKey| edited.iter().any(|rect| !footprint(*tile_key).intersect(*rect).is_empty());
+
+	let restart: Vec<_> = source.tasks.extract_if(.., |(tile_key, _)| touched(tile_key)).map(|(tile_key, _)| tile_key).collect();
+	for tile_key in restart {
+		source.spawn(tile_key);
+	}
+	for tile_key in source.live.iter().filter(|tile_key| touched(tile_key)) {
+		dirtier.mark_dirty(tile_key);
 	}
 }
 
@@ -75,6 +163,9 @@ fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer:
 	}
 }
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HeightmapSystems;
+
 pub struct HeightmapPlugin;
 
 impl Plugin for HeightmapPlugin {
@@ -84,9 +175,11 @@ impl Plugin for HeightmapPlugin {
 		noise.set_frequency(Some(0.0015));
 		noise.set_fractal_type(Some(FractalType::FBm));
 		noise.set_fractal_octaves(Some(5));
-		app.world_mut().spawn(HeightmapSource { noise: Arc::new(noise), tasks: Vec::new() });
+		let sampler = HeightSampler { noise: Arc::new(noise), overrides: Arc::default() };
+		app.world_mut().spawn(HeightmapSource { sampler: sampler.clone(), live: HashSet::new(), tasks: Vec::new() });
+		app.insert_resource(HeightField { sampler, edited: Vec::new() });
 		app.bile_add_data_type::<Heightmap>();
 		app.register_component_as::<dyn DataProducingNode<Heightmap>, HeightmapSource>()
-			.add_systems(Update, finish_heightmaps);
+			.add_systems(Update, (apply_height_edits, finish_heightmaps).chain().in_set(HeightmapSystems));
 	}
 }
