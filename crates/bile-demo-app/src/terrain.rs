@@ -9,7 +9,7 @@ use bevy::{
 };
 use bevy_trait_query::RegisterExt;
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataConsumingNode, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
+use bile_data::{DataConsumingNode, DataDirtier, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
@@ -52,6 +52,7 @@ impl ComponentData for TerrainMesh {
 struct TerrainMeshNode {
 	requested: Vec<TileKey>,
 	dropped: Vec<TileKey>,
+	dirtied: Vec<TileKey>,
 	ready: Vec<(TileKey, Arc<Heights>)>,
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
@@ -77,7 +78,18 @@ impl DataConsumingNode<Heightmap> for TerrainMeshNode {
 		self.ready.push((*tile_key, heights));
 	}
 
-	fn dirty_data(&mut self, _tile_key: &TileKey, _last_clean_tick: u64) {}
+	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64) {
+		self.ready.retain(|(key, _)| key != tile_key);
+		self.building.retain(|(key, _)| key != tile_key);
+		self.requested.push(*tile_key);
+		self.dirtied.push(*tile_key);
+	}
+}
+
+fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: DataDirtier<TerrainMesh>) {
+	for tile_key in node.into_inner().dirtied.drain(..) {
+		dirtier.mark_dirty(&tile_key);
+	}
 }
 
 fn update_terrain_meshes(
@@ -199,7 +211,7 @@ impl Plugin for TerrainPlugin {
 			.register_component_as::<dyn DataProducingNode<TerrainMesh>, TerrainMeshNode>()
 			.register_component_as::<dyn DataConsumingNode<Heightmap>, TerrainMeshNode>()
 			.add_systems(Startup, spawn_terrain)
-			.add_systems(Update, update_terrain_meshes)
+			.add_systems(Update, (dirty_terrain_meshes, update_terrain_meshes))
 			.add_systems(PostUpdate, add_terrain_materials)
 			.add_systems(BileTilesSchedule, decide_terrain_components.in_set(BileTilesSystemSet::UpdateWantedComponents));
 	}

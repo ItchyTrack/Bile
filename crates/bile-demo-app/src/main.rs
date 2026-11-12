@@ -7,6 +7,7 @@ use bile_region_loader::{RegionLoaderComponent, RegionLoaderPlugin};
 mod grass;
 mod heightmap;
 mod lod_camera;
+mod terraform;
 mod terrain;
 
 pub struct MainRendering;
@@ -18,7 +19,7 @@ fn main() {
 		.add_plugins(FreeCameraPlugin)
 		.add_plugins(bile::DefaultBilePlugins)
 		.add_plugins(RegionLoaderPlugin::<MainRendering>::default())
-		.add_plugins((heightmap::HeightmapPlugin, terrain::TerrainPlugin, grass::GrassPlugin, lod_camera::LodCameraPlugin))
+		.add_plugins((heightmap::HeightmapPlugin, terrain::TerrainPlugin, grass::GrassPlugin, lod_camera::LodCameraPlugin, terraform::TerraformPlugin))
 		.insert_resource(ClearColor(Color::srgb(0.6, 0.75, 0.9)))
 		.insert_resource(GlobalAmbientLight { brightness: 400.0, ..default() })
 		.add_systems(Startup, scene.spawn())
