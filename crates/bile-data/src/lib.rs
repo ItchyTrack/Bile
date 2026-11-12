@@ -241,7 +241,7 @@ pub fn pass_data<DT: DataType>(
 ) {
 	if data_column.finished.is_empty() { return; }
 
-	for new_data_params in std::mem::replace(&mut data_column.finished, HashMap::default()) {
+	for new_data_params in std::mem::take(&mut data_column.finished) {
 		let (dirty_state, new_data, usages, _source_entity) = &mut data_column.data.get_mut(&new_data_params.0).expect("Its not new data if its not there!");
 		for entity in new_data_params.1 {
 			let Ok(mut data_consuming_node) = data_consuming_nodes.get_mut(entity) else { continue; };
@@ -261,7 +261,7 @@ pub fn drop_data<DT: DataType>(
 ) {
 	if data_column.data_to_drop.is_empty() { return; }
 
-	for (params, sources) in std::mem::replace(&mut data_column.data_to_drop, HashMap::default()) {
+	for (params, sources) in std::mem::take(&mut data_column.data_to_drop) {
 		for source_entity in sources {
 			let Ok(mut node) = data_producing_nodes.get_mut(source_entity) else { continue; };
 			node.drop(&params);

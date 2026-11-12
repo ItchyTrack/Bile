@@ -88,7 +88,7 @@ fn for_each_bin_intersecting_key<K: TileIndexKey>(key: K, lod: u8, f: impl FnMut
 }
 
 fn bin_lod(size: UVec3) -> u8 {
-	let max_size = size.max_element().max(1) as u32;
+	let max_size = size.max_element().max(1);
 	(u32::BITS - (max_size - 1).leading_zeros()).min(i32::BITS - 2) as u8
 }
 
