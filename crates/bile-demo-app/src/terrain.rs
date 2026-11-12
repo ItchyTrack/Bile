@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::sync::Arc;
 
 use bevy::{
 	asset::RenderAssetUsages,
@@ -14,10 +14,10 @@ use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
 
-use crate::{MainRenderingLoader, heightmap::{Heightmap, HeightmapParams, Heights}};
+use crate::{MainRenderingLoader, heightmap::{Heightmap, Heights}};
 
 pub const TILE_SIZE: u32 = 64;
-const TILE_QUADS: usize = 32;
+const TILE_QUADS: usize = crate::heightmap::HEIGHTMAP_QUADS;
 const TERRAIN_HALF_WIDTH: i32 = 32768;
 const TERRAIN_HALF_HEIGHT: i32 = 256;
 
@@ -50,10 +50,8 @@ impl ComponentData for TerrainMesh {
 
 #[derive(Component, Default)]
 struct TerrainMeshNode {
-	tiles: HashMap<HeightmapParams, HashSet<TileKey>>,
 	requested: Vec<TileKey>,
-	waiting: HashSet<TileKey>,
-	unused: Vec<HeightmapParams>,
+	dropped: Vec<TileKey>,
 	ready: Vec<(TileKey, Arc<Heights>)>,
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
@@ -62,33 +60,24 @@ impl DataProducingNode<TerrainMesh> for TerrainMeshNode {
 	fn cost(&self, _request: &Request<TerrainMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<TerrainMesh>) {
-		self.tiles.entry(heightmap_params(request.params)).or_default().insert(request.params);
+		self.dropped.retain(|key| *key != request.params);
 		self.requested.push(request.params);
 	}
 
 	fn drop(&mut self, tile_key: &TileKey) {
-		let params = heightmap_params(*tile_key);
-		if let Some(tiles) = self.tiles.get_mut(&params) && tiles.remove(tile_key) && tiles.is_empty() {
-			self.tiles.remove(&params);
-			self.unused.push(params);
-		}
-		self.waiting.remove(tile_key);
+		self.requested.retain(|key| key != tile_key);
 		self.ready.retain(|(key, _)| key != tile_key);
 		self.building.retain(|(key, _)| key != tile_key);
+		self.dropped.push(*tile_key);
 	}
 }
 
 impl DataConsumingNode<Heightmap> for TerrainMeshNode {
-	fn pass_data(&mut self, params: &HeightmapParams, _tick: u64, heights: Arc<Heights>) {
-		let Some(tiles) = self.tiles.get(params) else { return };
-		for &tile_key in tiles {
-			if self.waiting.remove(&tile_key) {
-				self.ready.push((tile_key, heights.clone()));
-			}
-		}
+	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
+		self.ready.push((*tile_key, heights));
 	}
 
-	fn dirty_data(&mut self, _params: &HeightmapParams, _last_clean_tick: u64) {}
+	fn dirty_data(&mut self, _tile_key: &TileKey, _last_clean_tick: u64) {}
 }
 
 fn update_terrain_meshes(
@@ -99,17 +88,12 @@ fn update_terrain_meshes(
 ) {
 	let (entity, mut node) = node.into_inner();
 	let node = &mut *node;
-	for tile_key in std::mem::take(&mut node.requested) {
-		let params = heightmap_params(tile_key);
-		if !node.tiles.get(&params).is_some_and(|tiles| tiles.contains(&tile_key)) { continue; }
-		match heightmaps.request(Request::new(params, DirtyState::UpToDate), entity) {
-			Some(heights) => node.ready.push((tile_key, heights)),
-			None => { node.waiting.insert(tile_key); }
-		}
+	for tile_key in node.dropped.drain(..) {
+		heightmaps.cancel(&tile_key, entity);
 	}
-	for params in std::mem::take(&mut node.unused) {
-		if !node.tiles.contains_key(&params) {
-			heightmaps.cancel(&params, entity);
+	for tile_key in std::mem::take(&mut node.requested) {
+		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
+			node.ready.push((tile_key, heights));
 		}
 	}
 	for (tile_key, heights) in node.ready.drain(..) {
@@ -119,11 +103,6 @@ fn update_terrain_meshes(
 		let component = block_on(task).map(|mesh| Mesh3d(meshes.add(mesh)));
 		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, component);
 	}
-}
-
-fn heightmap_params(tile_key: TileKey) -> HeightmapParams {
-	let step = tile_key.size().x / TILE_QUADS as u32;
-	HeightmapParams { min: tile_key.min().xz() - step as i32, samples: UVec2::splat(TILE_QUADS as u32 + 3), step }
 }
 
 fn build_tile_mesh(heights: &Heights, tile_key: TileKey) -> Option<Mesh> {

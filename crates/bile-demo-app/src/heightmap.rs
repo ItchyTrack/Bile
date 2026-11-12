@@ -3,30 +3,27 @@ use std::sync::Arc;
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
 use bevy_trait_query::RegisterExt;
 use bile_data::{BileAddDataType, DataPasser, DataProducingNode, DataType, DirtyState, Request};
+use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
+pub const HEIGHTMAP_QUADS: usize = 32;
+const SAMPLES: usize = HEIGHTMAP_QUADS + 3;
 const TERRAIN_AMPLITUDE: f32 = 160.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct HeightmapParams {
-	pub min: IVec2,
-	pub samples: UVec2,
-	pub step: u32,
-}
-
 pub struct Heights {
-	params: HeightmapParams,
+	min: Vec2,
+	step: f32,
 	values: Vec<f32>,
 }
 
 impl Heights {
 	pub fn at(&self, i: usize, j: usize) -> f32 {
-		self.values[j * self.params.samples.x as usize + i]
+		self.values[j * SAMPLES + i]
 	}
 
 	pub fn sample(&self, position: Vec2) -> f32 {
-		let local = (position - self.params.min.as_vec2()) / self.params.step as f32;
-		let max = (self.params.samples - 2).as_vec2();
+		let local = (position - self.min) / self.step;
+		let max = Vec2::splat((SAMPLES - 2) as f32);
 		let cell = local.floor().clamp(Vec2::ZERO, max);
 		let t = local - cell;
 		let (i, j) = (cell.x as usize, cell.y as usize);
@@ -39,14 +36,14 @@ impl Heights {
 pub struct Heightmap;
 
 impl DataType for Heightmap {
-	type Params = HeightmapParams;
+	type Params = TileKey;
 	type Data = Arc<Heights>;
 }
 
 #[derive(Component)]
 struct HeightmapSource {
 	noise: Arc<FastNoiseLite>,
-	tasks: Vec<(HeightmapParams, Task<Heights>)>,
+	tasks: Vec<(TileKey, Task<Heights>)>,
 }
 
 impl DataProducingNode<Heightmap> for HeightmapSource {
@@ -54,25 +51,27 @@ impl DataProducingNode<Heightmap> for HeightmapSource {
 
 	fn request(&mut self, request: Request<Heightmap>) {
 		let noise = self.noise.clone();
-		let params = request.params;
-		self.tasks.push((params, AsyncComputeTaskPool::get().spawn(async move {
-			let values = (0..params.samples.y)
-				.flat_map(|j| (0..params.samples.x).map(move |i| params.min + IVec2::new(i as i32, j as i32) * params.step as i32))
-				.map(|position| noise.get_noise_2d(position.x as f32, position.y as f32) * TERRAIN_AMPLITUDE)
+		let tile_key = request.params;
+		self.tasks.push((tile_key, AsyncComputeTaskPool::get().spawn(async move {
+			let step = tile_key.size().x as f32 / HEIGHTMAP_QUADS as f32;
+			let min = tile_key.min().xz().as_vec2() - step;
+			let values = (0..SAMPLES)
+				.flat_map(|j| (0..SAMPLES).map(move |i| min + Vec2::new(i as f32, j as f32) * step))
+				.map(|position| noise.get_noise_2d(position.x, position.y) * TERRAIN_AMPLITUDE)
 				.collect();
-			Heights { params, values }
+			Heights { min, step, values }
 		})));
 	}
 
-	fn drop(&mut self, params: &HeightmapParams) {
-		self.tasks.retain(|(task_params, _)| task_params != params);
+	fn drop(&mut self, tile_key: &TileKey) {
+		self.tasks.retain(|(task_tile_key, _)| task_tile_key != tile_key);
 	}
 }
 
 fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer: DataPasser<Heightmap>) {
 	let (entity, mut source) = source.into_inner();
-	for (params, task) in source.tasks.extract_if(.., |(_, task)| task.is_finished()) {
-		passer.pass_data(entity, &params, DirtyState::UpToDate, Arc::new(block_on(task)));
+	for (tile_key, task) in source.tasks.extract_if(.., |(_, task)| task.is_finished()) {
+		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, Arc::new(block_on(task)));
 	}
 }
 
