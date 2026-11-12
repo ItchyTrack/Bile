@@ -183,7 +183,7 @@ fn spawn_grass_blades(
 	}
 }
 
-fn despawn_grass_blades(remove: On<Remove, Grass>, mut commands: Commands, tiles: Query<&GrassBlades>) {
+fn despawn_grass_blades(remove: On<Remove<Grass>>, mut commands: Commands, tiles: Query<&GrassBlades>) {
 	if let Ok(blades) = tiles.get(remove.entity) {
 		commands.entity(blades.0).try_despawn();
 		commands.entity(remove.entity).try_remove::<GrassBlades>();
