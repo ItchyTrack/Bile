@@ -2,69 +2,96 @@ use std::sync::Arc;
 
 use bevy::{
 	asset::RenderAssetUsages,
-	ecs::component::{ComponentId, ComponentIdFor},
+	ecs::component::ComponentIdFor,
 	mesh::{Indices, PrimitiveTopology},
 	prelude::*,
-	tasks::AsyncComputeTaskPool,
+	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bevy_trait_query::RegisterExt;
-use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, ComponentSource, DesiredComponents, FinishedRequestMessage, TileKey};
-use crossbeam_channel::{Receiver, Sender};
-use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
+use bile_components::{AddComponentData, ComponentData};
+use bile_data::{DataConsumingNode, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
+use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
-use crate::terrain::TerrainClass;
+use crate::{heightmap::{Heightmap, Heights}, terrain::TerrainClass};
 
-const TERRAIN_AMPLITUDE: f32 = 160.0;
 const BLADES_PER_TILE: u32 = 6000;
 const BLADE_HEIGHT: f32 = 0.9;
 const BLADE_WIDTH: f32 = 0.12;
 
-#[derive(Component, Default)]
-pub struct Grass;
+#[derive(Component, Clone)]
+pub struct Grass(Handle<Mesh>);
+
+#[derive(Component)]
+struct GrassBlades(Entity);
 
 #[derive(Resource)]
 struct GrassMaterial(Handle<StandardMaterial>);
 
-struct GrassMeshResult {
-	tile_entity: Entity,
-	tile_key: TileKey,
-	entity: Entity,
-	mesh: Option<Mesh>,
+pub struct GrassMesh;
+
+impl DataType for GrassMesh {
+	type Params = TileKey;
+	type Data = Option<Grass>;
 }
 
-#[derive(Resource)]
-pub struct GrassSource {
-	noise: Arc<FastNoiseLite>,
-	grass: ComponentId,
-	sender: Sender<GrassMeshResult>,
-	receiver: Receiver<GrassMeshResult>,
+impl ComponentData for GrassMesh {
+	type Component = Grass;
 }
 
-impl GrassSource {
-	fn new(grass: ComponentId) -> Self {
-		let mut noise = FastNoiseLite::new();
-		noise.set_noise_type(Some(NoiseType::OpenSimplex2));
-		noise.set_frequency(Some(0.0015));
-		noise.set_fractal_type(Some(FractalType::FBm));
-		noise.set_fractal_octaves(Some(5));
-		let (sender, receiver) = crossbeam_channel::unbounded();
-		Self { noise: Arc::new(noise), grass, sender, receiver }
+#[derive(Component, Default)]
+struct GrassMeshNode {
+	requested: Vec<TileKey>,
+	dropped: Vec<TileKey>,
+	ready: Vec<(TileKey, Arc<Heights>)>,
+	building: Vec<(TileKey, Task<Option<Mesh>>)>,
+}
+
+impl DataProducingNode<GrassMesh> for GrassMeshNode {
+	fn cost(&self, _request: &Request<GrassMesh>) -> Option<f32> { Some(1.0) }
+
+	fn request(&mut self, request: Request<GrassMesh>) {
+		self.dropped.retain(|key| *key != request.params);
+		self.requested.push(request.params);
+	}
+
+	fn drop(&mut self, tile_key: &TileKey) {
+		self.requested.retain(|key| key != tile_key);
+		self.ready.retain(|(key, _)| key != tile_key);
+		self.building.retain(|(key, _)| key != tile_key);
+		self.dropped.push(*tile_key);
 	}
 }
 
-impl ComponentSource for GrassSource {
-	fn component_cost(&self, _entity: Entity, _tile_key: TileKey, component: ComponentId) -> Option<f32> {
-		(component == self.grass).then_some(1.0)
+impl DataConsumingNode<Heightmap> for GrassMeshNode {
+	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
+		self.ready.push((*tile_key, heights));
 	}
 
-	fn request_component(&mut self, entity: Entity, tile_entity: Entity, tile_key: TileKey, component: ComponentId) {
-		assert!(component == self.grass);
-		let noise = self.noise.clone();
-		let sender = self.sender.clone();
-		AsyncComputeTaskPool::get().spawn(async move {
-			let mesh = build_grass_mesh(&noise, tile_key);
-			let _ = sender.send(GrassMeshResult { tile_entity, tile_key, entity, mesh });
-		}).detach();
+	fn dirty_data(&mut self, _tile_key: &TileKey, _last_clean_tick: u64) {}
+}
+
+fn update_grass_meshes(
+	node: Single<(Entity, &mut GrassMeshNode)>,
+	mut heightmaps: DataRequester<Heightmap>,
+	mut passer: DataPasser<GrassMesh>,
+	mut meshes: ResMut<Assets<Mesh>>,
+) {
+	let (entity, mut node) = node.into_inner();
+	let node = &mut *node;
+	for tile_key in node.dropped.drain(..) {
+		heightmaps.cancel(&tile_key, entity);
+	}
+	for tile_key in std::mem::take(&mut node.requested) {
+		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
+			node.ready.push((tile_key, heights));
+		}
+	}
+	for (tile_key, heights) in node.ready.drain(..) {
+		node.building.push((tile_key, AsyncComputeTaskPool::get().spawn(async move { build_grass_mesh(&heights, tile_key) })));
+	}
+	for (tile_key, task) in node.building.extract_if(.., |(_, task)| task.is_finished()) {
+		let component = block_on(task).map(|mesh| Grass(meshes.add(mesh)));
+		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, component);
 	}
 }
 
@@ -76,7 +103,7 @@ fn hash(mut x: u32) -> u32 {
 	x ^ (x >> 16)
 }
 
-fn build_grass_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
+fn build_grass_mesh(heights: &Heights, tile_key: TileKey) -> Option<Mesh> {
 	let min = tile_key.region.min();
 	let size = tile_key.region.size().x as f32;
 	let seed = hash(min.x as u32 ^ hash(min.z as u32 ^ hash(min.y as u32)));
@@ -95,7 +122,7 @@ fn build_grass_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
 		let angle = random() * std::f32::consts::TAU;
 		let height = BLADE_HEIGHT * (0.6 + random() * 0.8);
 		let shade = 0.7 + random() * 0.3;
-		let y = noise.get_noise_2d(x, z) * TERRAIN_AMPLITUDE;
+		let y = heights.sample(Vec2::new(x, z));
 		if y < min.y as f32 || y >= min.y as f32 + size { continue; }
 
 		let side = Vec3::new(angle.cos(), 0.0, angle.sin()) * BLADE_WIDTH;
@@ -119,42 +146,35 @@ fn build_grass_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
 }
 
 fn decide_grass_components(
+	mut commands: Commands,
 	terrain_class: ComponentIdFor<TerrainClass>,
-	grass: ComponentIdFor<Grass>,
-	mut tiles: Query<(&TileKey, &mut DesiredComponents), Added<TerrainClass>>,
+	tiles: Query<(Entity, &TileKey), Added<TerrainClass>>,
 ) {
-	for (tile_key, mut desired_components) in &mut tiles {
+	for (entity, tile_key) in &tiles {
 		if tile_key.lod == 0 {
-			desired_components.add_desired_component(terrain_class.get(), grass.get());
+			commands.entity(entity).add_desired_component::<GrassMesh>(terrain_class.get(), *tile_key);
 		}
 	}
 }
 
-fn receive_grass_meshes(
+fn spawn_grass_blades(
 	mut commands: Commands,
-	source: Res<GrassSource>,
-	tiles: Query<&DesiredComponents>,
 	material: Res<GrassMaterial>,
-	mut meshes: ResMut<Assets<Mesh>>,
-	mut finished: MessageWriter<FinishedRequestMessage>,
+	tiles: Query<(Entity, &Grass, Option<&GrassBlades>), Changed<Grass>>,
 ) {
-	for result in source.receiver.try_iter() {
-		let Ok(desired_components) = tiles.get(result.tile_entity) else { continue };
-		if !desired_components.is_component_desired(source.grass) { continue; }
-		if let Some(mesh) = result.mesh {
-			commands.entity(result.tile_entity).try_insert((Transform::default(), Visibility::default()));
-			commands.spawn((
-				Mesh3d(meshes.add(mesh)),
-				MeshMaterial3d(material.0.clone()),
-				ChildOf(result.tile_entity),
-			));
+	for (entity, grass, blades) in &tiles {
+		if let Some(blades) = blades {
+			commands.entity(blades.0).try_despawn();
 		}
-		finished.write(FinishedRequestMessage {
-			entity: result.entity,
-			tile_entity: result.tile_entity,
-			tile_key: result.tile_key,
-			component_id: source.grass,
-		});
+		let blades = commands.spawn((Mesh3d(grass.0.clone()), MeshMaterial3d(material.0.clone()), ChildOf(entity))).id();
+		commands.entity(entity).insert((GrassBlades(blades), Transform::default(), Visibility::default()));
+	}
+}
+
+fn despawn_grass_blades(remove: On<Remove, Grass>, mut commands: Commands, tiles: Query<&GrassBlades>) {
+	if let Ok(blades) = tiles.get(remove.entity) {
+		commands.entity(blades.0).try_despawn();
+		commands.entity(remove.entity).try_remove::<GrassBlades>();
 	}
 }
 
@@ -167,11 +187,14 @@ pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
 	fn build(&self, app: &mut App) {
-		let grass = app.world_mut().register_component::<Grass>();
-		app.register_component_as::<dyn ComponentSource, GrassSource>()
-			.insert_resource(GrassSource::new(grass))
+		app.world_mut().spawn(GrassMeshNode::default());
+		app.add_component_data::<GrassMesh>()
+			.register_component_as::<dyn DataProducingNode<GrassMesh>, GrassMeshNode>()
+			.register_component_as::<dyn DataConsumingNode<Heightmap>, GrassMeshNode>()
 			.add_systems(Startup, setup_grass_material)
-			.add_systems(Update, receive_grass_meshes)
+			.add_systems(Update, update_grass_meshes)
+			.add_systems(PostUpdate, spawn_grass_blades)
+			.add_observer(despawn_grass_blades)
 			.add_systems(BileTilesSchedule, decide_grass_components.in_set(BileTilesSystemSet::UpdateWantedComponents));
 	}
 }

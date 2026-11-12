@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy::ecs::component::ComponentId;
+use bile_components::WantCommands;
 use bile_math::NonZeroRegion;
 
-use crate::{CancelRequestMessage, DesiredComponents, TileClassReady, TileKey, TileKeyMap};
+use crate::{DesiredComponents, TileClassReady, TileKey, TileKeyMap};
 
 #[derive(Component, Default, Debug)]
 pub struct TileInstances {
@@ -70,7 +71,6 @@ pub fn modify_tile_classes(
 	mut tile_instances: Query<(Entity, &mut TileInstances), Without<DesiredComponents>>,
 	mut desired_components: Query<&mut DesiredComponents, Without<TileInstances>>,
 	mut ready_messages: MessageWriter<TileClassReady>,
-	mut cancel_messages: MessageWriter<CancelRequestMessage>,
 ) {
 	for (instances_entity, mut tile_instance) in &mut tile_instances {
 		if tile_instance.tile_class_additions.is_empty() && tile_instance.added_classes.is_empty() {
@@ -89,15 +89,14 @@ pub fn modify_tile_classes(
 						if delta > 0 {
 							unsafe { entity_commands.insert_by_id(class, ()); }
 						} else {
-							desired_component.remove_class_components(class);
+							for component_id in desired_component.remove_class_components(class) {
+								entity_commands.unwant_by_id(component_id);
+							}
 							entity_commands.remove_by_id(class);
 						}
 					}
 				}
 				if desired_component.get_classes().is_empty() {
-					for component_id in desired_component.take_cancelled_requests(true) {
-						cancel_messages.write(CancelRequestMessage { entity: instances_entity, tile_entity: entity, tile_key, component_id });
-					}
 					entity_commands.despawn();
 					tile_instance.key_to_entity.remove(tile_key);
 				}

@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*};
+use bile_components::{ComponentData, ComponentResolved, WantCommands};
 
-use crate::{TileKey, component_source::{CancelRequestMessage, ComponentSource, FinishedRequestMessage}};
+use crate::TileKey;
 
 #[derive(Debug, Clone, Copy, Message)]
 pub struct TileClassReady {
@@ -15,54 +16,58 @@ pub struct TileClassReady {
 #[derive(Debug, Component, Default)]
 pub struct DesiredComponents {
 	classes: HashMap<ComponentId, u32>,
-	components: HashMap<ComponentId, u32>,
 	components_by_class: HashMap<ComponentId, HashMap<ComponentId, u32>>,
-	newly_desired_components: HashSet<ComponentId>,
-	newly_undesired_components: HashSet<ComponentId>,
 	finished_components: HashSet<ComponentId>,
-	requested_components: HashSet<ComponentId>,
-	cancelled_components: HashSet<ComponentId>,
 	ready_classes: HashSet<ComponentId>,
 }
 
-impl DesiredComponents {
-	pub fn add_desired_component(&mut self, class_id: ComponentId, component_id: ComponentId) {
-		self.components_by_class.entry(class_id).or_default().entry(component_id).and_modify(|x| *x += 1).or_insert_with(|| {
-			let desired_count = self.components.entry(component_id).or_default();
-			*desired_count += 1;
+pub trait DesireForClass {
+	fn add_desired_component<DT: ComponentData>(&mut self, class_id: ComponentId, params: DT::Params) -> &mut Self;
+	fn remove_desired_component<DT: ComponentData>(&mut self, class_id: ComponentId) -> &mut Self;
+}
+
+impl DesireForClass for EntityCommands<'_> {
+	fn add_desired_component<DT: ComponentData>(&mut self, class_id: ComponentId, params: DT::Params) -> &mut Self {
+		self.queue(move |mut entity: EntityWorldMut| {
+			let component_id = entity.world_scope(|world| world.register_component::<DT::Component>());
+			let Some(mut desired_components) = entity.get_mut::<DesiredComponents>() else { return };
+			let count = desired_components.components_by_class.entry(class_id).or_default().entry(component_id).or_default();
+			*count += 1;
+			if *count == 1 {
+				bile_components::want::<DT>(&mut entity, params);
+			}
+		})
+	}
+	fn remove_desired_component<DT: ComponentData>(&mut self, class_id: ComponentId) -> &mut Self {
+		self.queue_silenced(move |mut entity: EntityWorldMut| {
+			let component_id = entity.world_scope(|world| world.register_component::<DT::Component>());
+			let Some(mut desired_components) = entity.get_mut::<DesiredComponents>() else { return };
+			let Some(components_for_class) = desired_components.components_by_class.get_mut(&class_id) else {
+				bevy::log::warn!("Negative want on component. This should not happen with correct usage.");
+				return;
+			};
+			let Some(desired_count) = components_for_class.get_mut(&component_id) else {
+				bevy::log::warn!("Negative want on component. This should not happen with correct usage.");
+				return;
+			};
 			if *desired_count == 1 {
-				if self.cancelled_components.remove(&component_id) {
-					self.requested_components.insert(component_id);
+				if components_for_class.len() == 1 {
+					desired_components.components_by_class.remove(&class_id);
 				} else {
-					self.newly_desired_components.insert(component_id);
+					components_for_class.remove(&component_id);
 				}
-				self.newly_undesired_components.remove(&component_id);
-			}
-			1
-		});
-	}
-	pub fn remove_desired_component(&mut self, class_id: ComponentId, component_id: ComponentId) {
-		let Some(components_for_class) = self.components_by_class.get_mut(&class_id) else {
-			bevy::log::warn!("Negative want on component. This should not happen with correct usage.");
-			return;
-		};
-		let Some(desired_count) = components_for_class.get_mut(&component_id) else {
-			bevy::log::warn!("Negative want on component. This should not happen with correct usage.");
-			return;
-		};
-		if *desired_count == 1 {
-			if components_for_class.len() == 1 {
-				self.components_by_class.remove(&class_id);
+				desired_components.release_finished(component_id);
+				bile_components::unwant::<DT>(&mut entity);
 			} else {
-				components_for_class.remove(&component_id);
+				*desired_count -= 1;
 			}
-			self.release_component(component_id);
-		} else {
-			*desired_count -= 1;
-		}
+		})
 	}
+}
+
+impl DesiredComponents {
 	pub fn is_component_desired(&self, component_id: ComponentId) -> bool {
-		self.components.contains_key(&component_id)
+		self.components_by_class.values().any(|components| components.contains_key(&component_id))
 	}
 	pub fn has_class(&self, class_id: ComponentId) -> bool {
 		self.classes.contains_key(&class_id)
@@ -70,24 +75,22 @@ impl DesiredComponents {
 	pub fn is_class_ready(&self, class_id: ComponentId) -> bool {
 		self.ready_classes.contains(&class_id)
 	}
-	fn release_component(&mut self, component_id: ComponentId) {
-		let desired_count = self.components.get_mut(&component_id).expect("If it was in components_by_class then its is components");
-		if *desired_count == 1 {
-			self.components.remove(&component_id);
+	#[must_use = "the returned components must be unwanted"]
+	pub(crate) fn remove_class_components(&mut self, class_id: ComponentId) -> Vec<ComponentId> {
+		let components: Vec<_> = self.components_by_class.remove(&class_id).map(|components| components.into_keys().collect()).unwrap_or_default();
+		for &component_id in &components {
+			self.release_finished(component_id);
+		}
+		components
+	}
+	fn release_finished(&mut self, component_id: ComponentId) {
+		if !self.is_component_desired(component_id) {
 			self.finished_components.remove(&component_id);
-			if self.requested_components.remove(&component_id) {
-				self.cancelled_components.insert(component_id);
-			}
-			self.newly_desired_components.remove(&component_id);
-			self.newly_undesired_components.insert(component_id);
-		} else {
-			*desired_count -= 1;
 		}
 	}
-	pub(crate) fn remove_class_components(&mut self, class_id: ComponentId) {
-		let Some(desired_components) = self.components_by_class.remove(&class_id) else { return; };
-		for component_id in desired_components.into_keys() {
-			self.release_component(component_id);
+	fn finish_component(&mut self, component_id: ComponentId) {
+		if self.is_component_desired(component_id) {
+			self.finished_components.insert(component_id);
 		}
 	}
 	// returns if a update needs to be made. desired_delta > 0 means add. desired_delta < 0 means remove.
@@ -118,18 +121,6 @@ impl DesiredComponents {
 	pub(crate) fn get_classes(&self) -> &HashMap<ComponentId, u32> {
 		&self.classes
 	}
-	fn finish_component(&mut self, component_id: ComponentId) {
-		if self.components.contains_key(&component_id) {
-			self.requested_components.remove(&component_id);
-			self.finished_components.insert(component_id);
-		}
-	}
-	pub(crate) fn take_cancelled_requests(&mut self, despawning: bool) -> impl Iterator<Item = ComponentId> + '_ {
-		if despawning {
-			self.cancelled_components.extend(self.requested_components.drain());
-		}
-		self.cancelled_components.drain()
-	}
 	fn class_ready(&self, class_id: ComponentId) -> bool {
 		self.components_by_class
 			.get(&class_id)
@@ -147,6 +138,7 @@ impl DesiredComponents {
 }
 
 pub(crate) fn remove_desired_components_for_removed_classes<T: Component>(
+	mut commands: Commands,
 	class_component_id: ComponentIdFor<T>,
 	mut desired_components_managers: Query<&mut DesiredComponents>,
 	mut removed_classes: RemovedComponents<T>
@@ -154,62 +146,15 @@ pub(crate) fn remove_desired_components_for_removed_classes<T: Component>(
 	let class_component_id = class_component_id.get();
 	for removed_class in removed_classes.read() {
 		if let Ok(mut desired_components_manager) = desired_components_managers.get_mut(removed_class) {
-			desired_components_manager.remove_class_components(class_component_id);
-		}
-	}
-}
-
-pub(crate) fn remove_newly_undesired_components(
-	mut commands: Commands,
-	mut desired_components_managers: Query<(Entity, &mut DesiredComponents, &TileKey, &ChildOf)>,
-	mut cancel_messages: MessageWriter<CancelRequestMessage>,
-) {
-	for (entity, mut desired_components_manager, &tile_key, child_of) in &mut desired_components_managers {
-		if desired_components_manager.newly_undesired_components.is_empty() && desired_components_manager.cancelled_components.is_empty() {
-			continue;
-		}
-		for component_id in desired_components_manager.take_cancelled_requests(false) {
-			cancel_messages.write(CancelRequestMessage { entity: child_of.parent(), tile_entity: entity, tile_key, component_id });
-		}
-
-		let mut entity_commands = commands.entity(entity);
-		for component_id in desired_components_manager.newly_undesired_components.drain() {
-			entity_commands.remove_by_id(component_id);
-		}
-	}
-}
-
-pub(crate) fn request_newly_desired(
-	mut desired_components_managers: Query<(&mut DesiredComponents, &ChildOf, Entity, &TileKey)>,
-	mut component_sources: Query<(Entity, &mut dyn ComponentSource)>,
-) {
-	for (mut desired_components_manager, child_of, tile_entity, &tile_key) in &mut desired_components_managers {
-		if desired_components_manager.newly_desired_components.is_empty() {
-			continue;
-		}
-		let desired_components_manager = &mut *desired_components_manager;
-		for component_id in desired_components_manager.newly_desired_components.drain() {
-			let mut best: Option<(Entity, usize, f32)> = None;
-			for (source_entity, sources) in component_sources.iter_mut() {
-				for (index, source) in sources.iter().enumerate() {
-					let Some(cost) = source.component_cost(child_of.parent(), tile_key, component_id) else { continue };
-					if best.is_none_or(|(_, _, best_cost)| cost < best_cost) {
-						best = Some((source_entity, index, cost));
-					}
-				}
+			for component_id in desired_components_manager.remove_class_components(class_component_id) {
+				commands.entity(removed_class).unwant_by_id(component_id);
 			}
-			let Some((source_entity, index, _)) = best else {
-				panic!("No ComponentSource can provide component {component_id:?} for tile {tile_key:?}");
-			};
-			desired_components_manager.requested_components.insert(component_id);
-			let (_, mut sources) = component_sources.get_mut(source_entity).unwrap();
-			sources.iter_mut().nth(index).unwrap().request_component(child_of.parent(), tile_entity, tile_key, component_id);
 		}
 	}
 }
 
 pub(crate) fn update_ready_classes(
-	mut finished_requests: MessageReader<FinishedRequestMessage>,
+	mut resolved_components: MessageReader<ComponentResolved>,
 	mut tiles: ParamSet<(
 		Query<&mut DesiredComponents>,
 		Query<(Entity, &mut DesiredComponents, &TileKey, &ChildOf), Changed<DesiredComponents>>,
@@ -218,9 +163,9 @@ pub(crate) fn update_ready_classes(
 ) {
 	{
 		let mut tiles = tiles.p0();
-		for finished_request in finished_requests.read() {
-			let Ok(mut desired_components) = tiles.get_mut(finished_request.tile_entity) else { continue };
-			desired_components.finish_component(finished_request.component_id);
+		for resolved in resolved_components.read() {
+			let Ok(mut desired_components) = tiles.get_mut(resolved.entity) else { continue };
+			desired_components.finish_component(resolved.component);
 		}
 	}
 

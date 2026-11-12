@@ -10,6 +10,7 @@ gpu_profiling = []
 [dependencies]
 bevy = { workspace = true }
 bile-math = { workspace = true }
+bile-data = { workspace = true }
 bile-scene = { workspace = true }
 bile-scene-source = { workspace = true }
 bile-tiles = { workspace = true }

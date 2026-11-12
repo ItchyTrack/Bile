@@ -2,23 +2,22 @@ use std::sync::Arc;
 
 use bevy::{
 	asset::RenderAssetUsages,
-	ecs::component::{ComponentId, ComponentIdFor},
+	ecs::component::ComponentIdFor,
 	mesh::{Indices, PrimitiveTopology},
 	prelude::*,
-	tasks::AsyncComputeTaskPool,
+	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bevy_trait_query::RegisterExt;
+use bile_components::{AddComponentData, ComponentData};
+use bile_data::{DataConsumingNode, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
-use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, ComponentSource, DesiredComponents, FinishedRequestMessage, RegisterTileClass, TileKey};
-use crossbeam_channel::{Receiver, Sender};
-use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
+use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
 
-use crate::MainRenderingLoader;
+use crate::{MainRenderingLoader, heightmap::{Heightmap, Heights}};
 
 pub const TILE_SIZE: u32 = 64;
-const TILE_QUADS: usize = 32;
-const TERRAIN_AMPLITUDE: f32 = 160.0;
+const TILE_QUADS: usize = crate::heightmap::HEIGHTMAP_QUADS;
 const TERRAIN_HALF_WIDTH: i32 = 32768;
 const TERRAIN_HALF_HEIGHT: i32 = 256;
 
@@ -38,67 +37,79 @@ pub fn lod_color(lod: u8) -> Color {
 	Color::hsl(100.0 + lod as f32 * 45.0, 0.45, 0.5)
 }
 
-struct TerrainMeshResult {
-	tile_entity: Entity,
-	tile_key: TileKey,
-	entity: Entity,
-	mesh: Option<Mesh>,
+pub struct TerrainMesh;
+
+impl DataType for TerrainMesh {
+	type Params = TileKey;
+	type Data = Option<Mesh3d>;
 }
 
-#[derive(Resource)]
-pub struct TerrainMeshSource {
-	noise: Arc<FastNoiseLite>,
-	mesh3d: ComponentId,
-	sender: Sender<TerrainMeshResult>,
-	receiver: Receiver<TerrainMeshResult>,
+impl ComponentData for TerrainMesh {
+	type Component = Mesh3d;
 }
 
-impl TerrainMeshSource {
-	fn new(mesh3d: ComponentId) -> Self {
-		let mut noise = FastNoiseLite::new();
-		noise.set_noise_type(Some(NoiseType::OpenSimplex2));
-		noise.set_frequency(Some(0.0015));
-		noise.set_fractal_type(Some(FractalType::FBm));
-		noise.set_fractal_octaves(Some(5));
-		let (sender, receiver) = crossbeam_channel::unbounded();
-		Self { noise: Arc::new(noise), mesh3d, sender, receiver }
+#[derive(Component, Default)]
+struct TerrainMeshNode {
+	requested: Vec<TileKey>,
+	dropped: Vec<TileKey>,
+	ready: Vec<(TileKey, Arc<Heights>)>,
+	building: Vec<(TileKey, Task<Option<Mesh>>)>,
+}
+
+impl DataProducingNode<TerrainMesh> for TerrainMeshNode {
+	fn cost(&self, _request: &Request<TerrainMesh>) -> Option<f32> { Some(1.0) }
+
+	fn request(&mut self, request: Request<TerrainMesh>) {
+		self.dropped.retain(|key| *key != request.params);
+		self.requested.push(request.params);
+	}
+
+	fn drop(&mut self, tile_key: &TileKey) {
+		self.requested.retain(|key| key != tile_key);
+		self.ready.retain(|(key, _)| key != tile_key);
+		self.building.retain(|(key, _)| key != tile_key);
+		self.dropped.push(*tile_key);
 	}
 }
 
-impl ComponentSource for TerrainMeshSource {
-	fn component_cost(&self, _entity: Entity, _tile_key: TileKey, component: ComponentId) -> Option<f32> {
-		(component == self.mesh3d).then_some(1.0)
+impl DataConsumingNode<Heightmap> for TerrainMeshNode {
+	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
+		self.ready.push((*tile_key, heights));
 	}
 
-	fn request_component(&mut self, entity: Entity, tile_entity: Entity, tile_key: TileKey, component: ComponentId) {
-		assert!(component == self.mesh3d);
-		let noise = self.noise.clone();
-		let sender = self.sender.clone();
-		AsyncComputeTaskPool::get().spawn(async move {
-			let mesh = build_tile_mesh(&noise, tile_key);
-			let _ = sender.send(TerrainMeshResult { tile_entity, tile_key, entity, mesh });
-		}).detach();
+	fn dirty_data(&mut self, _tile_key: &TileKey, _last_clean_tick: u64) {}
+}
+
+fn update_terrain_meshes(
+	node: Single<(Entity, &mut TerrainMeshNode)>,
+	mut heightmaps: DataRequester<Heightmap>,
+	mut passer: DataPasser<TerrainMesh>,
+	mut meshes: ResMut<Assets<Mesh>>,
+) {
+	let (entity, mut node) = node.into_inner();
+	let node = &mut *node;
+	for tile_key in node.dropped.drain(..) {
+		heightmaps.cancel(&tile_key, entity);
+	}
+	for tile_key in std::mem::take(&mut node.requested) {
+		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
+			node.ready.push((tile_key, heights));
+		}
+	}
+	for (tile_key, heights) in node.ready.drain(..) {
+		node.building.push((tile_key, AsyncComputeTaskPool::get().spawn(async move { build_tile_mesh(&heights, tile_key) })));
+	}
+	for (tile_key, task) in node.building.extract_if(.., |(_, task)| task.is_finished()) {
+		let component = block_on(task).map(|mesh| Mesh3d(meshes.add(mesh)));
+		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, component);
 	}
 }
 
-fn terrain_height(noise: &FastNoiseLite, x: f32, z: f32) -> f32 {
-	noise.get_noise_2d(x, z) * TERRAIN_AMPLITUDE
-}
-
-fn build_tile_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
+fn build_tile_mesh(heights: &Heights, tile_key: TileKey) -> Option<Mesh> {
 	let min = tile_key.region.min();
 	let size = tile_key.region.size().x as f32;
 	let step = size / TILE_QUADS as f32;
-	let samples = TILE_QUADS + 3;
-	let mut heights = Vec::with_capacity(samples * samples);
-	for j in 0..samples {
-		for i in 0..samples {
-			let x = min.x as f32 + (i as f32 - 1.0) * step;
-			let z = min.z as f32 + (j as f32 - 1.0) * step;
-			heights.push(terrain_height(noise, x, z));
-		}
-	}
-	let height = |i: usize, j: usize| heights[j * samples + i];
+	let height = |i: usize, j: usize| heights.at(i, j);
 
 	let y_min = min.y as f32;
 	let y_max = y_min + size;
@@ -135,39 +146,23 @@ fn build_tile_mesh(noise: &FastNoiseLite, tile_key: TileKey) -> Option<Mesh> {
 	Some(mesh)
 }
 
-fn receive_terrain_meshes(
+fn add_terrain_materials(
 	mut commands: Commands,
-	source: Res<TerrainMeshSource>,
-	tiles: Query<&DesiredComponents>,
 	materials: Res<TerrainMaterials>,
-	mut meshes: ResMut<Assets<Mesh>>,
-	mut finished: MessageWriter<FinishedRequestMessage>,
+	tiles: Query<(Entity, &TileKey), (With<TerrainClass>, Added<Mesh3d>)>,
 ) {
-	for result in source.receiver.try_iter() {
-		let Ok(desired_components) = tiles.get(result.tile_entity) else { continue };
-		if !desired_components.is_component_desired(source.mesh3d) { continue; }
-		if let Some(mesh) = result.mesh {
-			commands.entity(result.tile_entity).try_insert((
-				Mesh3d(meshes.add(mesh)),
-				MeshMaterial3d(materials.for_lod(result.tile_key.lod)),
-			));
-		}
-		finished.write(FinishedRequestMessage {
-			entity: result.entity,
-			tile_entity: result.tile_entity,
-			tile_key: result.tile_key,
-			component_id: source.mesh3d,
-		});
+	for (entity, tile_key) in &tiles {
+		commands.entity(entity).insert(MeshMaterial3d(materials.for_lod(tile_key.lod)));
 	}
 }
 
 fn decide_terrain_components(
+	mut commands: Commands,
 	terrain_class: ComponentIdFor<TerrainClass>,
-	mesh3d: ComponentIdFor<Mesh3d>,
-	mut tiles: Query<&mut DesiredComponents, Added<TerrainClass>>,
+	tiles: Query<(Entity, &TileKey), Added<TerrainClass>>,
 ) {
-	for mut desired_components in &mut tiles {
-		desired_components.add_desired_component(terrain_class.get(), mesh3d.get());
+	for (entity, tile_key) in &tiles {
+		commands.entity(entity).add_desired_component::<TerrainMesh>(terrain_class.get(), *tile_key);
 	}
 }
 
@@ -198,12 +193,14 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
 	fn build(&self, app: &mut App) {
 		app.world_mut().register_component::<TerrainClass>();
-		let mesh3d = app.world_mut().register_component::<Mesh3d>();
+		app.world_mut().spawn(TerrainMeshNode::default());
 		app.register_tile_class::<TerrainClass>()
-			.register_component_as::<dyn ComponentSource, TerrainMeshSource>()
-			.insert_resource(TerrainMeshSource::new(mesh3d))
+			.add_component_data::<TerrainMesh>()
+			.register_component_as::<dyn DataProducingNode<TerrainMesh>, TerrainMeshNode>()
+			.register_component_as::<dyn DataConsumingNode<Heightmap>, TerrainMeshNode>()
 			.add_systems(Startup, spawn_terrain)
-			.add_systems(Update, receive_terrain_meshes)
+			.add_systems(Update, update_terrain_meshes)
+			.add_systems(PostUpdate, add_terrain_materials)
 			.add_systems(BileTilesSchedule, decide_terrain_components.in_set(BileTilesSystemSet::UpdateWantedComponents));
 	}
 }
