@@ -9,7 +9,7 @@ use bevy::{
 };
 use bevy_trait_query::RegisterExt;
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataConsumingNode, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
+use bile_data::{DataConsumingNode, DataDirtier, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
 use crate::{heightmap::{Heightmap, Heights}, terrain::TerrainClass};
@@ -42,6 +42,7 @@ impl ComponentData for GrassMesh {
 struct GrassMeshNode {
 	requested: Vec<TileKey>,
 	dropped: Vec<TileKey>,
+	dirtied: Vec<TileKey>,
 	ready: Vec<(TileKey, Arc<Heights>)>,
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
@@ -67,7 +68,18 @@ impl DataConsumingNode<Heightmap> for GrassMeshNode {
 		self.ready.push((*tile_key, heights));
 	}
 
-	fn dirty_data(&mut self, _tile_key: &TileKey, _last_clean_tick: u64) {}
+	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64) {
+		self.ready.retain(|(key, _)| key != tile_key);
+		self.building.retain(|(key, _)| key != tile_key);
+		self.requested.push(*tile_key);
+		self.dirtied.push(*tile_key);
+	}
+}
+
+fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: DataDirtier<GrassMesh>) {
+	for tile_key in node.into_inner().dirtied.drain(..) {
+		dirtier.mark_dirty(&tile_key);
+	}
 }
 
 fn update_grass_meshes(
@@ -192,7 +204,7 @@ impl Plugin for GrassPlugin {
 			.register_component_as::<dyn DataProducingNode<GrassMesh>, GrassMeshNode>()
 			.register_component_as::<dyn DataConsumingNode<Heightmap>, GrassMeshNode>()
 			.add_systems(Startup, setup_grass_material)
-			.add_systems(Update, update_grass_meshes)
+			.add_systems(Update, (dirty_grass_meshes, update_grass_meshes))
 			.add_systems(PostUpdate, spawn_grass_blades)
 			.add_observer(despawn_grass_blades)
 			.add_systems(BileTilesSchedule, decide_grass_components.in_set(BileTilesSystemSet::UpdateWantedComponents));
