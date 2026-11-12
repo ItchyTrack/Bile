@@ -18,7 +18,7 @@ use crate::{MainRenderingLoader, heightmap::{Heightmap, Heights}};
 
 pub const TILE_SIZE: u32 = 64;
 const TILE_QUADS: usize = crate::heightmap::HEIGHTMAP_QUADS;
-const TERRAIN_HALF_WIDTH: i32 = 32768;
+const TERRAIN_HALF_WIDTH: i32 = i32::MAX / 8;
 const TERRAIN_HALF_HEIGHT: i32 = 256;
 
 #[derive(Component, Default)]
