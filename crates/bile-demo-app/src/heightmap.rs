@@ -99,6 +99,7 @@ pub struct Heightmap;
 impl DataType for Heightmap {
 	type Params = TileKey;
 	type Data = Arc<Heights>;
+	type Diff = ();
 }
 
 #[derive(Component)]
@@ -152,7 +153,7 @@ fn apply_height_edits(
 		source.spawn(tile_key);
 	}
 	for tile_key in source.live.iter().filter(|tile_key| touched(tile_key)) {
-		dirtier.mark_dirty(tile_key);
+		dirtier.mark_dirty(tile_key, None);
 	}
 }
 

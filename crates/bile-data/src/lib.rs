@@ -3,9 +3,6 @@ use std::{collections::{HashMap, HashSet}, hash::Hash};
 use bevy::{app::MainScheduleOrder, ecs::{schedule::ScheduleLabel, system::SystemParam}, prelude::*};
 use bevy_trait_query::One;
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Resource, Default)]
 pub struct StateTick {
 	current_tick: u64,
@@ -14,6 +11,7 @@ pub struct StateTick {
 pub trait DataType: 'static {
 	type Params: Clone + Hash + PartialEq + Eq + Send + Sync + 'static;
 	type Data: Clone + Send + Sync + 'static;
+	type Diff: Clone + Send + Sync + 'static;
 }
 
 #[derive(Clone, Copy)]
@@ -62,7 +60,7 @@ pub trait DataProducingNode<DT: DataType> {
 #[bevy_trait_query::queryable]
 pub trait DataConsumingNode<DT: DataType> {
 	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data);
-	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64); // will be passed the diff later
+	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>); // will be passed the diff later
 }
 
 #[derive(Resource)]
@@ -170,7 +168,7 @@ pub struct DataDirtier<'w, 's, DT: DataType> {
 }
 
 impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
-	pub fn mark_dirty(&mut self, params: &DT::Params) {
+	pub fn mark_dirty(&mut self, params: &DT::Params, diff: Option<&DT::Diff>) {
 		let Some((dirty_state, _data, usages, _source_entity)) = &mut self.data_column.data.get_mut(params) else { return; };
 		*dirty_state = DirtyState::Dirty { tick: self.bile_state_tick.current_tick - 1 /* Was valid on the last tick */ };
 		usages.retain(|&usage| {
@@ -178,7 +176,7 @@ impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
 				bevy::log::error!(name: "Missing DataConsumingNode", "Usage was not removed for non existent DataConsumingNode {}.", usage);
 				return false;
 			};
-			data_producing_node.dirty_data(params, self.bile_state_tick.current_tick - 1);
+			data_producing_node.dirty_data(params, self.bile_state_tick.current_tick - 1, diff);
 			true
 		})
 	}

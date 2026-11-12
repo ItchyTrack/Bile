@@ -40,7 +40,7 @@ impl<DT: ComponentData> DataConsumingNode<DT> for Want<DT> {
 	fn pass_data(&mut self, _params: &DT::Params, _tick: u64, data: DT::Data) {
 		self.received = Some(data);
 	}
-	fn dirty_data(&mut self, _params: &DT::Params, _last_clean_tick: u64) {
+	fn dirty_data(&mut self, _params: &DT::Params, _last_clean_tick: u64, _diff: Option<&DT::Diff>) {
 		self.requested = false;
 	}
 }

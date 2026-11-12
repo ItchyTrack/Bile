@@ -32,6 +32,7 @@ pub struct GrassMesh;
 impl DataType for GrassMesh {
 	type Params = TileKey;
 	type Data = Option<Grass>;
+	type Diff = ();
 }
 
 impl ComponentData for GrassMesh {
@@ -68,7 +69,7 @@ impl DataConsumingNode<Heightmap> for GrassMeshNode {
 		self.ready.push((*tile_key, heights));
 	}
 
-	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64) {
+	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64, _diff: Option<&()>) {
 		self.ready.retain(|(key, _)| key != tile_key);
 		self.building.retain(|(key, _)| key != tile_key);
 		self.requested.push(*tile_key);
@@ -78,7 +79,7 @@ impl DataConsumingNode<Heightmap> for GrassMeshNode {
 
 fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: DataDirtier<GrassMesh>) {
 	for tile_key in node.into_inner().dirtied.drain(..) {
-		dirtier.mark_dirty(&tile_key);
+		dirtier.mark_dirty(&tile_key, None);
 	}
 }
 

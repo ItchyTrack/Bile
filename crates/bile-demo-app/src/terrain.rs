@@ -42,6 +42,7 @@ pub struct TerrainMesh;
 impl DataType for TerrainMesh {
 	type Params = TileKey;
 	type Data = Option<Mesh3d>;
+	type Diff = ();
 }
 
 impl ComponentData for TerrainMesh {
@@ -78,7 +79,7 @@ impl DataConsumingNode<Heightmap> for TerrainMeshNode {
 		self.ready.push((*tile_key, heights));
 	}
 
-	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64) {
+	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64, _diff: Option<&()>) {
 		self.ready.retain(|(key, _)| key != tile_key);
 		self.building.retain(|(key, _)| key != tile_key);
 		self.requested.push(*tile_key);
@@ -88,7 +89,7 @@ impl DataConsumingNode<Heightmap> for TerrainMeshNode {
 
 fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: DataDirtier<TerrainMesh>) {
 	for tile_key in node.into_inner().dirtied.drain(..) {
-		dirtier.mark_dirty(&tile_key);
+		dirtier.mark_dirty(&tile_key, None);
 	}
 }
 

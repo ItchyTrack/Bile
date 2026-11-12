@@ -12,6 +12,7 @@ struct Num;
 impl DataType for Num {
 	type Params = u32;
 	type Data = Option<Value>;
+	type Diff = ();
 }
 
 impl ComponentData for Num {
@@ -23,6 +24,7 @@ struct OtherNum;
 impl DataType for OtherNum {
 	type Params = u32;
 	type Data = Option<Value>;
+	type Diff = ();
 }
 
 impl ComponentData for OtherNum {
