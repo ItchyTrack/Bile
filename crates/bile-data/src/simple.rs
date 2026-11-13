@@ -55,7 +55,7 @@ pub struct DataRequester<'w, 's, DT: DataType> {
 }
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
-	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
+	pub fn request(&mut self, request: Request<DT>, requester_node: Entity, _: bool) -> Option<DT::Data> {
 		if let Some(info) = self.data_column.data.get_mut(&request.params) {
 			if info.dirty_state.satisfies(&request.allowed_tick) {
 				info.usages.insert(requester_node);
@@ -241,15 +241,15 @@ fn setup_bevy_resources<DT: DataType>(app: &mut App) {
 		.init_resource::<DataColumn<DT>>();
 }
 
-pub trait BileRegisterCached {
-	fn register_producer_cached<DT, C>(&mut self) -> &mut Self
+pub trait BileRegisterSimple {
+	fn register_producer_simple<DT, C>(&mut self) -> &mut Self
     where DT: DataType, C: Component + DataProducingNode<DT>;
-	fn register_consumer_cached<DT, C>(&mut self) -> &mut Self
+	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
     where DT: DataType, C: Component + DataConsumingNode<DT>;
 }
 
-impl BileRegisterCached for App {
-    fn register_producer_cached<DT, C>(&mut self) -> &mut Self
+impl BileRegisterSimple for App {
+    fn register_producer_simple<DT, C>(&mut self) -> &mut Self
     where DT: DataType, C: Component + DataProducingNode<DT>,
     {
         self.register_component_as::<dyn DataProducingNode<DT>, C>();
@@ -257,7 +257,7 @@ impl BileRegisterCached for App {
         self
     }
 
-    fn register_consumer_cached<DT, C>(&mut self) -> &mut Self
+    fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
     where DT: DataType, C: Component + DataConsumingNode<DT>,
     {
         self.register_component_as::<dyn DataConsumingNode<DT>, C>();

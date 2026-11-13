@@ -8,7 +8,7 @@ use bevy::{
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataType, DirtyState, Request, cached::{self, BileRegisterCached}};
+use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
@@ -57,7 +57,7 @@ struct TerrainMeshNode {
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
 
-impl cached::DataProducingNode<TerrainMesh> for TerrainMeshNode {
+impl simple::DataProducingNode<TerrainMesh> for TerrainMeshNode {
 	fn cost(&self, _request: &Request<TerrainMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<TerrainMesh>) {
@@ -73,7 +73,7 @@ impl cached::DataProducingNode<TerrainMesh> for TerrainMeshNode {
 	}
 }
 
-impl cached::DataConsumingNode<Heightmap> for TerrainMeshNode {
+impl simple::DataConsumingNode<Heightmap> for TerrainMeshNode {
 	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
 		self.ready.push((*tile_key, heights));
 	}
@@ -86,7 +86,7 @@ impl cached::DataConsumingNode<Heightmap> for TerrainMeshNode {
 	}
 }
 
-fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: cached::DataDirtier<TerrainMesh>) {
+fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: simple::DataDirtier<TerrainMesh>) {
 	for tile_key in node.into_inner().dirtied.drain(..) {
 		dirtier.mark_dirty(&tile_key, None);
 	}
@@ -94,8 +94,8 @@ fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: cached:
 
 fn update_terrain_meshes(
 	node: Single<(Entity, &mut TerrainMeshNode)>,
-	mut heightmaps: cached::DataRequester<Heightmap>,
-	mut passer: cached::DataPasser<TerrainMesh>,
+	mut heightmaps: simple::DataRequester<Heightmap>,
+	mut passer: simple::DataPasser<TerrainMesh>,
 	mut meshes: ResMut<Assets<Mesh>>,
 ) {
 	let (entity, mut node) = node.into_inner();
@@ -104,7 +104,7 @@ fn update_terrain_meshes(
 		heightmaps.cancel(&tile_key, entity);
 	}
 	for tile_key in std::mem::take(&mut node.requested) {
-		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
+		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity, true) {
 			node.ready.push((tile_key, heights));
 		}
 	}
@@ -208,8 +208,8 @@ impl Plugin for TerrainPlugin {
 		app.world_mut().spawn(TerrainMeshNode::default());
 		app.register_tile_class::<TerrainClass>()
 			.add_component_data::<TerrainMesh>()
-			.register_producer_cached::<TerrainMesh, TerrainMeshNode>()
-			.register_consumer_cached::<Heightmap, TerrainMeshNode>()
+			.register_producer_simple::<TerrainMesh, TerrainMeshNode>()
+			.register_consumer_simple::<Heightmap, TerrainMeshNode>()
 			.add_systems(Startup, spawn_terrain)
 			.add_systems(Update, (dirty_terrain_meshes, update_terrain_meshes))
 			.add_systems(PostUpdate, add_terrain_materials)

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*, transform::TransformSystems};
-use bile_data::{DataType, DirtyState, Request, cached::{self, BileRegisterCached}};
+use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
 
 #[cfg(test)]
 mod tests;
@@ -35,7 +35,7 @@ impl<DT: ComponentData> Want<DT> {
 	pub fn is_resolved(&self) -> bool { self.resolved }
 }
 
-impl<DT: ComponentData> cached::DataConsumingNode<DT> for Want<DT> {
+impl<DT: ComponentData> simple::DataConsumingNode<DT> for Want<DT> {
 	fn pass_data(&mut self, _params: &DT::Params, _tick: u64, data: DT::Data) {
 		self.received = Some(data);
 	}
@@ -118,7 +118,7 @@ fn queue_removed_want<DT: ComponentData>(remove: On<Remove<Want<DT>>>, wants: Qu
 fn update_wants<DT: ComponentData>(
 	mut commands: Commands,
 	component: ComponentIdFor<DT::Component>,
-	mut requester: cached::DataRequester<DT>,
+	mut requester: simple::DataRequester<DT>,
 	mut removed: ResMut<RemovedWants<DT>>,
 	mut resolved: MessageWriter<ComponentResolved>,
 	mut wants: Query<(Entity, &mut Want<DT>), Changed<Want<DT>>>,
@@ -130,7 +130,7 @@ fn update_wants<DT: ComponentData>(
 		let want = want.bypass_change_detection();
 		if !want.requested {
 			want.requested = true;
-			if let Some(data) = requester.request(Request::new(want.params.clone(), DirtyState::UpToDate), entity) {
+			if let Some(data) = requester.request(Request::new(want.params.clone(), DirtyState::UpToDate), entity, false) {
 				want.received = Some(data);
 			}
 		}
@@ -157,7 +157,7 @@ impl AddComponentData for App {
 		self.world_mut().get_resource_or_init::<ComponentDataRegistry>().wants_by_component.entry(component).or_default().push((want, unwant::<DT>));
 		self.add_message::<ComponentResolved>()
 			.init_resource::<RemovedWants<DT>>()
-			.register_consumer_cached::<DT, Want<DT>>()
+			.register_consumer_simple::<DT, Want<DT>>()
 			.add_observer(queue_removed_want::<DT>)
 			.add_systems(PostUpdate, update_wants::<DT>.before(TransformSystems::Propagate))
 	}

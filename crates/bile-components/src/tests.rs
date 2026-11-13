@@ -1,5 +1,5 @@
 use bevy::ecs::system::RunSystemOnce;
-use bile_data::{BileDataPlugin, cached::{self, BileRegisterCached}};
+use bile_data::{BileDataPlugin, simple::{self, BileRegisterSimple}};
 
 use crate::*;
 
@@ -36,7 +36,7 @@ struct Producer {
 	drops: Vec<u32>,
 }
 
-impl cached::DataProducingNode<Num> for Producer {
+impl simple::DataProducingNode<Num> for Producer {
 	fn cost(&self, _request: &Request<Num>) -> Option<f32> { Some(1.0) }
 	fn request(&mut self, request: Request<Num>) { self.requests.push(request.params); }
 	fn drop(&mut self, params: &u32) { self.drops.push(*params); }
@@ -47,7 +47,7 @@ fn setup() -> (App, Entity, Entity) {
 	app.add_plugins(BileDataPlugin);
 	app.add_component_data::<Num>()
 		.add_component_data::<OtherNum>()
-		.register_producer_cached::<Num, Producer>();
+		.register_producer_simple::<Num, Producer>();
 	let producer = app.world_mut().spawn(Producer::default()).id();
 	let entity = app.world_mut().spawn_empty().id();
 	(app, producer, entity)
@@ -55,7 +55,7 @@ fn setup() -> (App, Entity, Entity) {
 
 fn pass(app: &mut App, producer: Entity, params: u32, data: Option<Value>) {
 	app.world_mut()
-		.run_system_once(move |mut passer: cached::DataPasser<Num>| passer.pass_data(producer, &params, DirtyState::UpToDate, data.clone()))
+		.run_system_once(move |mut passer: simple::DataPasser<Num>| passer.pass_data(producer, &params, DirtyState::UpToDate, data.clone()))
 		.unwrap();
 }
 

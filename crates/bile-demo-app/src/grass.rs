@@ -8,7 +8,7 @@ use bevy::{
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataType, DirtyState, Request, cached::{self, BileRegisterCached}};
+use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
 use crate::{heightmap::{Heightmap, Heights}, terrain::TerrainClass};
@@ -47,7 +47,7 @@ struct GrassMeshNode {
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
 
-impl cached::DataProducingNode<GrassMesh> for GrassMeshNode {
+impl simple::DataProducingNode<GrassMesh> for GrassMeshNode {
 	fn cost(&self, _request: &Request<GrassMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<GrassMesh>) {
@@ -63,7 +63,7 @@ impl cached::DataProducingNode<GrassMesh> for GrassMeshNode {
 	}
 }
 
-impl cached::DataConsumingNode<Heightmap> for GrassMeshNode {
+impl simple::DataConsumingNode<Heightmap> for GrassMeshNode {
 	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
 		self.ready.push((*tile_key, heights));
 	}
@@ -76,7 +76,7 @@ impl cached::DataConsumingNode<Heightmap> for GrassMeshNode {
 	}
 }
 
-fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: cached::DataDirtier<GrassMesh>) {
+fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: simple::DataDirtier<GrassMesh>) {
 	for tile_key in node.into_inner().dirtied.drain(..) {
 		dirtier.mark_dirty(&tile_key, None);
 	}
@@ -84,8 +84,8 @@ fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: cached::Dat
 
 fn update_grass_meshes(
 	node: Single<(Entity, &mut GrassMeshNode)>,
-	mut heightmaps: cached::DataRequester<Heightmap>,
-	mut passer: cached::DataPasser<GrassMesh>,
+	mut heightmaps: simple::DataRequester<Heightmap>,
+	mut passer: simple::DataPasser<GrassMesh>,
 	mut meshes: ResMut<Assets<Mesh>>,
 ) {
 	let (entity, mut node) = node.into_inner();
@@ -94,7 +94,7 @@ fn update_grass_meshes(
 		heightmaps.cancel(&tile_key, entity);
 	}
 	for tile_key in std::mem::take(&mut node.requested) {
-		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
+		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity, true) {
 			node.ready.push((tile_key, heights));
 		}
 	}
@@ -201,8 +201,8 @@ impl Plugin for GrassPlugin {
 	fn build(&self, app: &mut App) {
 		app.world_mut().spawn(GrassMeshNode::default());
 		app.add_component_data::<GrassMesh>()
-			.register_producer_cached::<GrassMesh, GrassMeshNode>()
-			.register_consumer_cached::<Heightmap, GrassMeshNode>()
+			.register_producer_simple::<GrassMesh, GrassMeshNode>()
+			.register_consumer_simple::<Heightmap, GrassMeshNode>()
 			.add_systems(Startup, setup_grass_material)
 			.add_systems(Update, (dirty_grass_meshes, update_grass_meshes))
 			.add_systems(PostUpdate, spawn_grass_blades)

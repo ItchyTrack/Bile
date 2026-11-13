@@ -269,25 +269,25 @@ fn setup_bevy_resources<DT: DataType>(app: &mut App) {
 
 pub trait BileRegisterStreaming {
 	fn register_producer_streaming<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataProducingNode<DT>;
+	where DT: DataType, C: Component + DataProducingNode<DT>;
 	fn register_consumer_streaming<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataConsumingNode<DT>;
+	where DT: DataType, C: Component + DataConsumingNode<DT>;
 }
 
 impl BileRegisterStreaming for App {
-    fn register_producer_streaming<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataProducingNode<DT>,
-    {
-        self.register_component_as::<dyn DataProducingNode<DT>, C>();
+	fn register_producer_streaming<DT, C>(&mut self) -> &mut Self
+	where DT: DataType, C: Component + DataProducingNode<DT>,
+	{
+		self.register_component_as::<dyn DataProducingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);
-        self
-    }
+		self
+	}
 
-    fn register_consumer_streaming<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataConsumingNode<DT>,
-    {
-        self.register_component_as::<dyn DataConsumingNode<DT>, C>();
+	fn register_consumer_streaming<DT, C>(&mut self) -> &mut Self
+	where DT: DataType, C: Component + DataConsumingNode<DT>,
+	{
+		self.register_component_as::<dyn DataConsumingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);
-        self
-    }
+		self
+	}
 }
