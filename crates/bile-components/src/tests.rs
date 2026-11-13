@@ -1,6 +1,5 @@
 use bevy::ecs::system::RunSystemOnce;
-use bevy_trait_query::RegisterExt;
-use bile_data::{BileDataPlugin, single_cached};
+use bile_data::{BileDataPlugin, single_cached::{self, BileRegisterSingleCached}};
 
 use crate::*;
 
@@ -48,7 +47,7 @@ fn setup() -> (App, Entity, Entity) {
 	app.add_plugins(BileDataPlugin);
 	app.add_component_data::<Num>()
 		.add_component_data::<OtherNum>()
-		.register_component_as::<dyn single_cached::DataProducingNode<Num>, Producer>();
+		.register_producer_single_cached::<Num, Producer>();
 	let producer = app.world_mut().spawn(Producer::default()).id();
 	let entity = app.world_mut().spawn_empty().id();
 	(app, producer, entity)

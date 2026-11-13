@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*, transform::TransformSystems};
-use bevy_trait_query::RegisterExt;
-use bile_data::{BileAddDataType, DataType, DirtyState, Request, single_cached};
+use bile_data::{DataType, DirtyState, Request, single_cached::{self, BileRegisterSingleCached}};
 
 #[cfg(test)]
 mod tests;
@@ -153,13 +152,12 @@ pub trait AddComponentData {
 
 impl AddComponentData for App {
 	fn add_component_data<DT: ComponentData>(&mut self) -> &mut Self {
-		self.bile_add_data_type::<DT>();
 		let component = self.world_mut().register_component::<DT::Component>();
 		let want = self.world_mut().register_component::<Want<DT>>();
 		self.world_mut().get_resource_or_init::<ComponentDataRegistry>().wants_by_component.entry(component).or_default().push((want, unwant::<DT>));
 		self.add_message::<ComponentResolved>()
 			.init_resource::<RemovedWants<DT>>()
-			.register_component_as::<dyn single_cached::DataConsumingNode<DT>, Want<DT>>()
+			.register_consumer_single_cached::<DT, Want<DT>>()
 			.add_observer(queue_removed_want::<DT>)
 			.add_systems(PostUpdate, update_wants::<DT>.before(TransformSystems::Propagate))
 	}

@@ -1,8 +1,7 @@
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
-use bevy_trait_query::RegisterExt;
-use bile_data::{BileAddDataType, DataType, DirtyState, Request, single_cached};
+use bile_data::{DataType, DirtyState, Request, single_cached::{self, BileRegisterSingleCached}};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
@@ -179,8 +178,7 @@ impl Plugin for HeightmapPlugin {
 		let sampler = HeightSampler { noise: Arc::new(noise), overrides: Arc::default() };
 		app.world_mut().spawn(HeightmapSource { sampler: sampler.clone(), live: HashSet::new(), tasks: Vec::new() });
 		app.insert_resource(HeightField { sampler, edited: Vec::new() });
-		app.bile_add_data_type::<Heightmap>();
-		app.register_component_as::<dyn single_cached::DataProducingNode<Heightmap>, HeightmapSource>()
+		app.register_producer_single_cached::<Heightmap, HeightmapSource>()
 			.add_systems(Update, (apply_height_edits, finish_heightmaps).chain().in_set(HeightmapSystems));
 	}
 }

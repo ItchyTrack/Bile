@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
-use bevy_trait_query::One;
+use bevy_trait_query::{One, RegisterExt};
 
-use crate::{default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}, single_cached};
+use crate::default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick};
 
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<DT: DataType> {
@@ -18,9 +18,16 @@ pub trait DataConsumingNode<DT: DataType> {
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>); // will be passed the diff later
 }
 
+pub struct DataInfo<DT: DataType> {
+	pub dirty_state: DirtyState,
+	pub data: DT::Data,
+	pub usages: HashSet<Entity>,
+	pub source_entity: Entity,
+}
+
 #[derive(Resource)]
 pub struct DataColumn<DT: DataType> {
-	data: HashMap<DT::Params, (DirtyState, DT::Data, HashSet<Entity>, Entity)>,
+	data: HashMap<DT::Params, DataInfo<DT>>,
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>, // this data is no longer requested from this Entity. Either no one wants it or something else provided it.
 	finished: HashMap<DT::Params, HashSet<Entity>>,
 	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
@@ -38,7 +45,7 @@ impl<DT: DataType> Default for DataColumn<DT> {
 }
 
 impl<DT: DataType> DataColumn<DT> {
-	pub fn get(&self, params: &DT::Params) -> Option<&(DirtyState, DT::Data, HashSet<Entity>, Entity)> { self.data.get(params) }
+	pub fn get(&self, params: &DT::Params) -> Option<&DataInfo<DT>> { self.data.get(params) }
 }
 
 #[derive(SystemParam)]
@@ -49,10 +56,10 @@ pub struct DataRequester<'w, 's, DT: DataType> {
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		if let Some((dirty_state, data, usages, _source_entity)) = self.data_column.data.get_mut(&request.params) {
-			if dirty_state.satisfies(&request.allowed_tick) {
-				usages.insert(requester_node);
-				return Some(data.clone());
+		if let Some(info) = self.data_column.data.get_mut(&request.params) {
+			if info.dirty_state.satisfies(&request.allowed_tick) {
+				info.usages.insert(requester_node);
+				return Some(info.data.clone());
 			}
 		}
 		let already_requested = self.data_column.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|required| required.satisfies(&request.allowed_tick)));
@@ -87,11 +94,11 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 			}
 		}
 
-		let Some((_, _, usages, source_entity)) = self.data_column.data.get_mut(params) else { return; };
-		usages.remove(&requester_node);
+		let Some(info) = self.data_column.data.get_mut(params) else { return; };
+		info.usages.remove(&requester_node);
 
-		if usages.is_empty() && empty_finished {
-			let source_entity = *source_entity;
+		if info.usages.is_empty() && empty_finished {
+			let source_entity = info.source_entity;
 			if !self.data_column.waiting.contains_key(params) {
 				self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
 				self.data_column.data.remove(params);
@@ -124,9 +131,9 @@ pub struct DataDirtier<'w, 's, DT: DataType> {
 
 impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
 	pub fn mark_dirty(&mut self, params: &DT::Params, diff: Option<&DT::Diff>) {
-		let Some((dirty_state, _data, usages, _source_entity)) = &mut self.data_column.data.get_mut(params) else { return; };
-		*dirty_state = DirtyState::Dirty { tick: self.bile_state_tick.current_tick() - 1 /* Was valid on the last tick */ };
-		usages.retain(|&usage| {
+		let Some(info) = self.data_column.data.get_mut(params) else { return; };
+		info.dirty_state = DirtyState::Dirty { tick: self.bile_state_tick.current_tick() - 1 /* Was valid on the last tick */ };
+		info.usages.retain(|&usage| {
 			let Ok(mut data_producing_node) = self.data_producing_nodes.get_mut(usage) else {
 				bevy::log::error!(name: "Missing DataConsumingNode", "Usage was not removed for non existent DataConsumingNode {}.", usage);
 				return false;
@@ -144,12 +151,12 @@ pub struct DataPasser<'w, DT: DataType> {
 
 impl<'w, DT: DataType> DataPasser<'w, DT> {
 	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
-		if let Some((existing, _, _, _)) = self.data_column.data.get(params) && existing.is_fresher_than(&dirty_state) {
+		if let Some(existing) = self.data_column.data.get(params) && existing.dirty_state.is_fresher_than(&dirty_state) {
 			return;
 		}
 
 		let Some(waiting) = self.data_column.waiting.remove(params) else {
-			if self.data_column.data.get(params).is_none_or(|(_, _, _, existing_source)| *existing_source != source_entity) {
+			if self.data_column.data.get(params).is_none_or(|existing| existing.source_entity != source_entity) {
 				self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
 			}
 			return; /* No need to store data thats not wanted */
@@ -157,19 +164,19 @@ impl<'w, DT: DataType> DataPasser<'w, DT> {
 
 		match self.data_column.data.entry(params.clone()) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
-				let (old_dirty_state, old_data, _usages, old_source_entity) = entry.get_mut();
-				*old_dirty_state = dirty_state;
-				*old_data = data;
-				if *old_source_entity != source_entity {
-					let old_source_entity_copy = *old_source_entity;
-					*old_source_entity = source_entity;
+				let info = entry.get_mut();
+				info.dirty_state = dirty_state;
+				info.data = data;
+				if info.source_entity != source_entity {
+					let old_source_entity = info.source_entity;
+					info.source_entity = source_entity;
 					let old_sources = self.data_column.data_to_drop.entry(params.clone()).or_default();
 					old_sources.remove(&source_entity);
-					old_sources.insert(old_source_entity_copy);
+					old_sources.insert(old_source_entity);
 				}
 			}
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert((dirty_state, data, HashSet::default(), source_entity));
+				entry.insert(DataInfo { dirty_state, data, usages: HashSet::default(), source_entity });
 				self.data_column.data_to_drop.entry(params.clone()).or_default().remove(&source_entity);
 			}
 		}
@@ -197,14 +204,14 @@ pub fn pass_data<DT: DataType>(
 	if data_column.finished.is_empty() { return; }
 
 	for new_data_params in std::mem::take(&mut data_column.finished) {
-		let (dirty_state, new_data, usages, _source_entity) = &mut data_column.data.get_mut(&new_data_params.0).expect("Its not new data if its not there!");
+		let info = data_column.data.get_mut(&new_data_params.0).expect("Its not new data if its not there!");
 		for entity in new_data_params.1 {
 			let Ok(mut data_consuming_node) = data_consuming_nodes.get_mut(entity) else { continue; };
-			usages.insert(entity);
+			info.usages.insert(entity);
 			data_consuming_node.pass_data(
 				&new_data_params.0,
-				match dirty_state { DirtyState::Dirty { tick } => *tick, _ => bile_state_tick.current_tick() },
-				new_data.clone()
+				match info.dirty_state { DirtyState::Dirty { tick } => tick, _ => bile_state_tick.current_tick() },
+				info.data.clone()
 			);
 		}
 	}
@@ -224,17 +231,37 @@ pub fn drop_data<DT: DataType>(
 	}
 }
 
-pub trait BileAddDataTypeSingleCached {
-	fn bile_add_data_type_single_cached<DT: DataType>(&mut self) -> &mut Self;
+fn setup_bevy_resources<DT: DataType>(app: &mut App) {
+	if app.world().contains_resource::<DataColumn<DT>>() { return; }
+	app
+		.add_systems(BileDataSchedule, (
+			pass_data::<DT>.in_set(BileDataSystemSet::PassData),
+			drop_data::<DT>.in_set(BileDataSystemSet::DropData),
+		))
+		.init_resource::<DataColumn<DT>>();
 }
 
-impl BileAddDataTypeSingleCached for App {
-	fn bile_add_data_type_single_cached<DT: DataType>(&mut self) -> &mut Self {
-		self
-			.add_systems(BileDataSchedule, (
-				single_cached::pass_data::<DT>.in_set(BileDataSystemSet::PassData),
-				single_cached::drop_data::<DT>.in_set(BileDataSystemSet::DropData),
-			))
-			.init_resource::<single_cached::DataColumn<DT>>()
-	}
+pub trait BileRegisterSingleCached {
+	fn register_producer_single_cached<DT, C>(&mut self) -> &mut Self
+    where DT: DataType, C: Component + DataProducingNode<DT>;
+	fn register_consumer_single_cached<DT, C>(&mut self) -> &mut Self
+    where DT: DataType, C: Component + DataConsumingNode<DT>;
+}
+
+impl BileRegisterSingleCached for App {
+    fn register_producer_single_cached<DT, C>(&mut self) -> &mut Self
+    where DT: DataType, C: Component + DataProducingNode<DT>,
+    {
+        self.register_component_as::<dyn DataProducingNode<DT>, C>();
+		setup_bevy_resources::<DT>(self);
+        self
+    }
+
+    fn register_consumer_single_cached<DT, C>(&mut self) -> &mut Self
+    where DT: DataType, C: Component + DataConsumingNode<DT>,
+    {
+        self.register_component_as::<dyn DataConsumingNode<DT>, C>();
+		setup_bevy_resources::<DT>(self);
+        self
+    }
 }

@@ -7,9 +7,8 @@ use bevy::{
 	prelude::*,
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
-use bevy_trait_query::RegisterExt;
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataType, DirtyState, Request, single_cached};
+use bile_data::{DataType, DirtyState, Request, single_cached::{self, BileRegisterSingleCached}};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
 use crate::{heightmap::{Heightmap, Heights}, terrain::TerrainClass};
@@ -202,8 +201,8 @@ impl Plugin for GrassPlugin {
 	fn build(&self, app: &mut App) {
 		app.world_mut().spawn(GrassMeshNode::default());
 		app.add_component_data::<GrassMesh>()
-			.register_component_as::<dyn single_cached::DataProducingNode<GrassMesh>, GrassMeshNode>()
-			.register_component_as::<dyn single_cached::DataConsumingNode<Heightmap>, GrassMeshNode>()
+			.register_producer_single_cached::<GrassMesh, GrassMeshNode>()
+			.register_consumer_single_cached::<Heightmap, GrassMeshNode>()
 			.add_systems(Startup, setup_grass_material)
 			.add_systems(Update, (dirty_grass_meshes, update_grass_meshes))
 			.add_systems(PostUpdate, spawn_grass_blades)

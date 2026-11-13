@@ -7,9 +7,8 @@ use bevy::{
 	prelude::*,
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
-use bevy_trait_query::RegisterExt;
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataType, DirtyState, Request, single_cached};
+use bile_data::{DataType, DirtyState, Request, single_cached::{self, BileRegisterSingleCached}};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
@@ -209,8 +208,8 @@ impl Plugin for TerrainPlugin {
 		app.world_mut().spawn(TerrainMeshNode::default());
 		app.register_tile_class::<TerrainClass>()
 			.add_component_data::<TerrainMesh>()
-			.register_component_as::<dyn single_cached::DataProducingNode<TerrainMesh>, TerrainMeshNode>()
-			.register_component_as::<dyn single_cached::DataConsumingNode<Heightmap>, TerrainMeshNode>()
+			.register_producer_single_cached::<TerrainMesh, TerrainMeshNode>()
+			.register_consumer_single_cached::<Heightmap, TerrainMeshNode>()
 			.add_systems(Startup, spawn_terrain)
 			.add_systems(Update, (dirty_terrain_meshes, update_terrain_meshes))
 			.add_systems(PostUpdate, add_terrain_materials)
