@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*, transform::TransformSystems};
 use bevy_trait_query::RegisterExt;
-use bile_data::{BileAddDataType, DataConsumingNode, DataRequester, DataType, DirtyState, Request};
+use bile_data::{BileAddDataType, DataType, DirtyState, Request, single_cached};
 
 #[cfg(test)]
 mod tests;
@@ -36,7 +36,7 @@ impl<DT: ComponentData> Want<DT> {
 	pub fn is_resolved(&self) -> bool { self.resolved }
 }
 
-impl<DT: ComponentData> DataConsumingNode<DT> for Want<DT> {
+impl<DT: ComponentData> single_cached::DataConsumingNode<DT> for Want<DT> {
 	fn pass_data(&mut self, _params: &DT::Params, _tick: u64, data: DT::Data) {
 		self.received = Some(data);
 	}
@@ -119,7 +119,7 @@ fn queue_removed_want<DT: ComponentData>(remove: On<Remove<Want<DT>>>, wants: Qu
 fn update_wants<DT: ComponentData>(
 	mut commands: Commands,
 	component: ComponentIdFor<DT::Component>,
-	mut requester: DataRequester<DT>,
+	mut requester: single_cached::DataRequester<DT>,
 	mut removed: ResMut<RemovedWants<DT>>,
 	mut resolved: MessageWriter<ComponentResolved>,
 	mut wants: Query<(Entity, &mut Want<DT>), Changed<Want<DT>>>,
@@ -159,7 +159,7 @@ impl AddComponentData for App {
 		self.world_mut().get_resource_or_init::<ComponentDataRegistry>().wants_by_component.entry(component).or_default().push((want, unwant::<DT>));
 		self.add_message::<ComponentResolved>()
 			.init_resource::<RemovedWants<DT>>()
-			.register_component_as::<dyn DataConsumingNode<DT>, Want<DT>>()
+			.register_component_as::<dyn single_cached::DataConsumingNode<DT>, Want<DT>>()
 			.add_observer(queue_removed_want::<DT>)
 			.add_systems(PostUpdate, update_wants::<DT>.before(TransformSystems::Propagate))
 	}

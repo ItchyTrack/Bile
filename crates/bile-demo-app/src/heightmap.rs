@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
 use bevy_trait_query::RegisterExt;
-use bile_data::{BileAddDataType, DataDirtier, DataPasser, DataProducingNode, DataType, DirtyState, Request};
+use bile_data::{BileAddDataType, DataType, DirtyState, Request, single_cached};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
@@ -116,7 +116,7 @@ impl HeightmapSource {
 	}
 }
 
-impl DataProducingNode<Heightmap> for HeightmapSource {
+impl single_cached::DataProducingNode<Heightmap> for HeightmapSource {
 	fn cost(&self, _request: &Request<Heightmap>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<Heightmap>) {
@@ -140,7 +140,7 @@ fn footprint(tile_key: TileKey) -> Rect {
 fn apply_height_edits(
 	mut field: ResMut<HeightField>,
 	source: Single<&mut HeightmapSource>,
-	mut dirtier: DataDirtier<Heightmap>,
+	mut dirtier: single_cached::DataDirtier<Heightmap>,
 ) {
 	if field.edited.is_empty() { return; }
 	let edited = std::mem::take(&mut field.edited);
@@ -157,7 +157,7 @@ fn apply_height_edits(
 	}
 }
 
-fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer: DataPasser<Heightmap>) {
+fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer: single_cached::DataPasser<Heightmap>) {
 	let (entity, mut source) = source.into_inner();
 	for (tile_key, task) in source.tasks.extract_if(.., |(_, task)| task.is_finished()) {
 		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, Arc::new(block_on(task)));
@@ -180,7 +180,7 @@ impl Plugin for HeightmapPlugin {
 		app.world_mut().spawn(HeightmapSource { sampler: sampler.clone(), live: HashSet::new(), tasks: Vec::new() });
 		app.insert_resource(HeightField { sampler, edited: Vec::new() });
 		app.bile_add_data_type::<Heightmap>();
-		app.register_component_as::<dyn DataProducingNode<Heightmap>, HeightmapSource>()
+		app.register_component_as::<dyn single_cached::DataProducingNode<Heightmap>, HeightmapSource>()
 			.add_systems(Update, (apply_height_edits, finish_heightmaps).chain().in_set(HeightmapSystems));
 	}
 }

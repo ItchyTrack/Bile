@@ -9,7 +9,7 @@ use bevy::{
 };
 use bevy_trait_query::RegisterExt;
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataConsumingNode, DataDirtier, DataPasser, DataProducingNode, DataRequester, DataType, DirtyState, Request};
+use bile_data::{DataType, DirtyState, Request, single_cached};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
@@ -58,7 +58,7 @@ struct TerrainMeshNode {
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
 
-impl DataProducingNode<TerrainMesh> for TerrainMeshNode {
+impl single_cached::DataProducingNode<TerrainMesh> for TerrainMeshNode {
 	fn cost(&self, _request: &Request<TerrainMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<TerrainMesh>) {
@@ -74,7 +74,7 @@ impl DataProducingNode<TerrainMesh> for TerrainMeshNode {
 	}
 }
 
-impl DataConsumingNode<Heightmap> for TerrainMeshNode {
+impl single_cached::DataConsumingNode<Heightmap> for TerrainMeshNode {
 	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
 		self.ready.push((*tile_key, heights));
 	}
@@ -87,7 +87,7 @@ impl DataConsumingNode<Heightmap> for TerrainMeshNode {
 	}
 }
 
-fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: DataDirtier<TerrainMesh>) {
+fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: single_cached::DataDirtier<TerrainMesh>) {
 	for tile_key in node.into_inner().dirtied.drain(..) {
 		dirtier.mark_dirty(&tile_key, None);
 	}
@@ -95,8 +95,8 @@ fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: DataDir
 
 fn update_terrain_meshes(
 	node: Single<(Entity, &mut TerrainMeshNode)>,
-	mut heightmaps: DataRequester<Heightmap>,
-	mut passer: DataPasser<TerrainMesh>,
+	mut heightmaps: single_cached::DataRequester<Heightmap>,
+	mut passer: single_cached::DataPasser<TerrainMesh>,
 	mut meshes: ResMut<Assets<Mesh>>,
 ) {
 	let (entity, mut node) = node.into_inner();
@@ -209,8 +209,8 @@ impl Plugin for TerrainPlugin {
 		app.world_mut().spawn(TerrainMeshNode::default());
 		app.register_tile_class::<TerrainClass>()
 			.add_component_data::<TerrainMesh>()
-			.register_component_as::<dyn DataProducingNode<TerrainMesh>, TerrainMeshNode>()
-			.register_component_as::<dyn DataConsumingNode<Heightmap>, TerrainMeshNode>()
+			.register_component_as::<dyn single_cached::DataProducingNode<TerrainMesh>, TerrainMeshNode>()
+			.register_component_as::<dyn single_cached::DataConsumingNode<Heightmap>, TerrainMeshNode>()
 			.add_systems(Startup, spawn_terrain)
 			.add_systems(Update, (dirty_terrain_meshes, update_terrain_meshes))
 			.add_systems(PostUpdate, add_terrain_materials)
