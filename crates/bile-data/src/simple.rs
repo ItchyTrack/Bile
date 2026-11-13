@@ -20,9 +20,15 @@ pub trait DataConsumingNode<DT: DataType> {
 
 pub struct DataInfo<DT: DataType> {
 	pub dirty_state: DirtyState,
-	pub data: DT::Data,
+	pub data: Option<DT::Data>,
 	pub usages: HashSet<Entity>,
 	pub source_entity: Entity,
+	retain: bool,
+}
+
+struct Waiter {
+	allowed_tick: DirtyState,
+	cache: bool,
 }
 
 #[derive(Resource)]
@@ -30,7 +36,7 @@ pub struct DataColumn<DT: DataType> {
 	data: HashMap<DT::Params, DataInfo<DT>>,
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>, // this data is no longer requested from this Entity. Either no one wants it or something else provided it.
 	finished: HashMap<DT::Params, HashSet<Entity>>,
-	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
+	waiting: HashMap<DT::Params, HashMap<Entity, Waiter>>,
 }
 
 impl<DT: DataType> Default for DataColumn<DT> {
@@ -55,16 +61,18 @@ pub struct DataRequester<'w, 's, DT: DataType> {
 }
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
-	pub fn request(&mut self, request: Request<DT>, requester_node: Entity, _: bool) -> Option<DT::Data> {
+	pub fn request(&mut self, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data> {
 		if let Some(info) = self.data_column.data.get_mut(&request.params) {
 			if info.dirty_state.satisfies(&request.allowed_tick) {
-				info.usages.insert(requester_node);
-				return Some(info.data.clone());
+				if let Some(data) = &info.data {
+					info.usages.insert(requester_node);
+					return Some(data.clone());
+				}
 			}
 		}
-		let already_requested = self.data_column.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|required| required.satisfies(&request.allowed_tick)));
+		let already_requested = self.data_column.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|waiter| waiter.allowed_tick.satisfies(&request.allowed_tick)));
 		// update requester
-		self.data_column.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
+		self.data_column.waiting.entry(request.params.clone()).or_default().insert(requester_node, Waiter { allowed_tick: request.allowed_tick, cache });
 		if already_requested { return None; }
 		// get node
 		let node_entity = Self::best_node(&self.data_producing_node, &request);
@@ -94,15 +102,21 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 			}
 		}
 
-		let Some(info) = self.data_column.data.get_mut(params) else { return; };
-		info.usages.remove(&requester_node);
+		let has_waiting = self.data_column.waiting.contains_key(params);
+		let source_to_drop = {
+			let Some(info) = self.data_column.data.get_mut(params) else { return; };
+			info.usages.remove(&requester_node);
 
-		if info.usages.is_empty() && empty_finished {
-			let source_entity = info.source_entity;
-			if !self.data_column.waiting.contains_key(params) {
-				self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
-				self.data_column.data.remove(params);
+			if info.usages.is_empty() && empty_finished && !has_waiting && info.data.take().is_some() {
+				info.retain = false;
+				Some(info.source_entity)
+			} else {
+				None
 			}
+		};
+
+		if let Some(source_entity) = source_to_drop {
+			self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
 		}
 	}
 
@@ -151,22 +165,34 @@ pub struct DataPasser<'w, DT: DataType> {
 
 impl<'w, DT: DataType> DataPasser<'w, DT> {
 	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
-		if let Some(existing) = self.data_column.data.get(params) && existing.dirty_state.is_fresher_than(&dirty_state) {
+		if let Some(existing) = self.data_column.data.get(params) && existing.data.is_some() && existing.dirty_state.is_fresher_than(&dirty_state) {
 			return;
 		}
 
 		let Some(waiting) = self.data_column.waiting.remove(params) else {
-			if self.data_column.data.get(params).is_none_or(|existing| existing.source_entity != source_entity) {
+			if self.data_column.data.get(params).is_none_or(|existing| existing.data.is_none() || existing.source_entity != source_entity) {
 				self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
 			}
 			return; /* No need to store data thats not wanted */
 		};
 
+		let mut want_cache = false;
+		let mut still_waiting = HashMap::default();
+		for (entity, waiter) in waiting {
+			if dirty_state.satisfies(&waiter.allowed_tick) {
+				want_cache |= waiter.cache;
+				self.data_column.finished.entry(params.clone()).or_default().insert(entity);
+			} else {
+				still_waiting.insert(entity, waiter);
+			}
+		}
+
 		match self.data_column.data.entry(params.clone()) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
 				let info = entry.get_mut();
 				info.dirty_state = dirty_state;
-				info.data = data;
+				info.data = Some(data);
+				info.retain |= want_cache;
 				if info.source_entity != source_entity {
 					let old_source_entity = info.source_entity;
 					info.source_entity = source_entity;
@@ -176,20 +202,25 @@ impl<'w, DT: DataType> DataPasser<'w, DT> {
 				}
 			}
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert(DataInfo { dirty_state, data, usages: HashSet::default(), source_entity });
+				entry.insert(DataInfo { dirty_state, data: Some(data), usages: HashSet::default(), source_entity, retain: want_cache });
 				self.data_column.data_to_drop.entry(params.clone()).or_default().remove(&source_entity);
 			}
 		}
 
-		let satisfied = self.data_column.finished.entry(params.clone()).or_default();
-		let mut still_waiting = HashMap::default();
-		for (entity, required) in waiting {
-			if dirty_state.satisfies(&required) {
-				satisfied.insert(entity);
-			} else {
-				still_waiting.insert(entity, required);
+		if self.data_column.finished.get(params).is_none_or(HashSet::is_empty) {
+			let source_to_drop = {
+				let info = self.data_column.data.get_mut(params).expect("Data was just inserted!");
+				if !info.retain && info.data.take().is_some() {
+					Some(info.source_entity)
+				} else {
+					None
+				}
+			};
+			if let Some(source_entity) = source_to_drop {
+				self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
 			}
 		}
+
 		if !still_waiting.is_empty() {
 			self.data_column.waiting.insert(params.clone(), still_waiting);
 		}
@@ -204,15 +235,28 @@ pub fn pass_data<DT: DataType>(
 	if data_column.finished.is_empty() { return; }
 
 	for new_data_params in std::mem::take(&mut data_column.finished) {
-		let info = data_column.data.get_mut(&new_data_params.0).expect("Its not new data if its not there!");
-		for entity in new_data_params.1 {
-			let Ok(mut data_consuming_node) = data_consuming_nodes.get_mut(entity) else { continue; };
-			info.usages.insert(entity);
-			data_consuming_node.pass_data(
-				&new_data_params.0,
-				match info.dirty_state { DirtyState::Dirty { tick } => tick, _ => bile_state_tick.current_tick() },
-				info.data.clone()
-			);
+		let source_to_drop = {
+			let info = data_column.data.get_mut(&new_data_params.0).expect("Its not new data if its not there!");
+			for entity in new_data_params.1 {
+				let Some(data) = info.data.clone() else { continue; };
+				let Ok(mut data_consuming_node) = data_consuming_nodes.get_mut(entity) else { continue; };
+				info.usages.insert(entity);
+				data_consuming_node.pass_data(
+					&new_data_params.0,
+					match info.dirty_state { DirtyState::Dirty { tick } => tick, _ => bile_state_tick.current_tick() },
+					data
+				);
+			}
+
+			if !info.retain && info.data.take().is_some() {
+				Some(info.source_entity)
+			} else {
+				None
+			}
+		};
+
+		if let Some(source_entity) = source_to_drop {
+			data_column.data_to_drop.entry(new_data_params.0).or_default().insert(source_entity);
 		}
 	}
 }
