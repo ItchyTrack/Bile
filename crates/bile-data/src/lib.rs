@@ -1,6 +1,7 @@
 pub mod default;
-pub mod single_cached;
-pub mod single_uncached;
+pub mod cached;
+pub mod uncached;
+pub mod streaming;
 
 use bevy::prelude::*;
 

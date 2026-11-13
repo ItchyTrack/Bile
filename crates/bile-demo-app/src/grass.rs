@@ -8,7 +8,7 @@ use bevy::{
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataType, DirtyState, Request, single_cached::{self, BileRegisterSingleCached}};
+use bile_data::{DataType, DirtyState, Request, cached::{self, BileRegisterCached}};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
 use crate::{heightmap::{Heightmap, Heights}, terrain::TerrainClass};
@@ -47,7 +47,7 @@ struct GrassMeshNode {
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
 
-impl single_cached::DataProducingNode<GrassMesh> for GrassMeshNode {
+impl cached::DataProducingNode<GrassMesh> for GrassMeshNode {
 	fn cost(&self, _request: &Request<GrassMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<GrassMesh>) {
@@ -63,7 +63,7 @@ impl single_cached::DataProducingNode<GrassMesh> for GrassMeshNode {
 	}
 }
 
-impl single_cached::DataConsumingNode<Heightmap> for GrassMeshNode {
+impl cached::DataConsumingNode<Heightmap> for GrassMeshNode {
 	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
 		self.ready.push((*tile_key, heights));
 	}
@@ -76,7 +76,7 @@ impl single_cached::DataConsumingNode<Heightmap> for GrassMeshNode {
 	}
 }
 
-fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: single_cached::DataDirtier<GrassMesh>) {
+fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: cached::DataDirtier<GrassMesh>) {
 	for tile_key in node.into_inner().dirtied.drain(..) {
 		dirtier.mark_dirty(&tile_key, None);
 	}
@@ -84,8 +84,8 @@ fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: single_cach
 
 fn update_grass_meshes(
 	node: Single<(Entity, &mut GrassMeshNode)>,
-	mut heightmaps: single_cached::DataRequester<Heightmap>,
-	mut passer: single_cached::DataPasser<GrassMesh>,
+	mut heightmaps: cached::DataRequester<Heightmap>,
+	mut passer: cached::DataPasser<GrassMesh>,
 	mut meshes: ResMut<Assets<Mesh>>,
 ) {
 	let (entity, mut node) = node.into_inner();
@@ -201,8 +201,8 @@ impl Plugin for GrassPlugin {
 	fn build(&self, app: &mut App) {
 		app.world_mut().spawn(GrassMeshNode::default());
 		app.add_component_data::<GrassMesh>()
-			.register_producer_single_cached::<GrassMesh, GrassMeshNode>()
-			.register_consumer_single_cached::<Heightmap, GrassMeshNode>()
+			.register_producer_cached::<GrassMesh, GrassMeshNode>()
+			.register_consumer_cached::<Heightmap, GrassMeshNode>()
 			.add_systems(Startup, setup_grass_material)
 			.add_systems(Update, (dirty_grass_meshes, update_grass_meshes))
 			.add_systems(PostUpdate, spawn_grass_blades)
