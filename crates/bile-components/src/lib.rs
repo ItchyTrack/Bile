@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*, transform::TransformSystems};
 use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
 
+// TODO: Redo this do add a new bile storage type that does not impl API type.
+// The storage uses bevy components and requestes from simple nodes (can add others trivaily).
+// Then when an Added<C> is added we then make the request.
+
 #[cfg(test)]
 mod tests;
 

@@ -8,6 +8,9 @@ use crate::default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
 
+// TODO: redo all of this to be like simple with the comsumer + API, data storage, and producer.
+// Then also impl a for simple so that requests made can be fullfiled by simple producers.
+
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<DT: DataType> {
 	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request

@@ -5,12 +5,7 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick};
 
-#[bevy_trait_query::queryable]
-pub trait DataProducingNode<DT: DataType> {
-	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request
-	fn request(&mut self, request: Request<DT>);
-	fn drop(&mut self, params: &DT::Params);
-}
+// Simple Consuming
 
 #[bevy_trait_query::queryable]
 pub trait DataConsumingNode<DT: DataType> {
@@ -18,6 +13,59 @@ pub trait DataConsumingNode<DT: DataType> {
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>); // will be passed the diff later
 }
 
+#[bevy_trait_query::queryable]
+pub trait DataRequestingAPI<DT: DataType> {
+	fn cost(&self, dyn_system_param_stuff: u32, request: &Request<DT>) -> Option<f32>;
+	fn request<'w>(&mut self, dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity) -> Option<&'w DT::Data>;
+	fn cancel(&mut self, dyn_system_param_stuff: u32, params: &DT::Params, requester_node: Entity);
+}
+
+// TODO: Add `DynSystemParam`s to allow quering of data from implementations of `DataProducingNode`.
+#[derive(SystemParam)]
+pub struct DataRequester<'w, 's, DT: DataType> {
+	data_requesting_apis: Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>,
+}
+
+impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
+	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<&'w DT::Data> {
+		let api_entity = Self::best_api(&self.data_requesting_apis, &request);
+		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
+			if entity == api_entity { continue; }
+			data_requesting_api.cancel(0, &request.params, requester_node);
+		}
+		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(0, request, requester_node)
+	}
+	pub fn cancel(&mut self, params: DT::Params, requester_node: Entity) {
+		for (mut data_requesting_api, _entity) in self.data_requesting_apis.iter_mut() {
+			data_requesting_api.cancel(0, &params, requester_node);
+		}
+	}
+	fn best_api(data_requesting_apis: &Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>, request: &Request<DT>) -> Entity {
+		let mut best = (f32::MAX, None);
+		for (data_requesting_api, entity) in data_requesting_apis.iter() {
+			let Some(cost) = data_requesting_api.cost(0, request) else { continue; };
+			if best.0 > cost {
+				best.0 = cost;
+				best.1 = Some(entity);
+			}
+		}
+		let Some(entity) = best.1 else {
+			panic!("Data request failed to find node to fulfill the request. This should never happen!");
+		};
+		entity
+	}
+}
+
+// Simple Producing
+
+#[bevy_trait_query::queryable]
+pub trait DataProducingNode<DT: DataType> {
+	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request
+	fn request(&mut self, request: Request<DT>);
+	fn drop(&mut self, params: &DT::Params);
+}
+
+// Simple Producing Data
 pub struct DataInfo<DT: DataType> {
 	pub dirty_state: DirtyState,
 	pub data: Option<DT::Data>,
@@ -25,7 +73,6 @@ pub struct DataInfo<DT: DataType> {
 	pub source_entity: Entity,
 	retain: bool,
 }
-
 struct Waiter {
 	allowed_tick: DirtyState,
 	cache: bool,
@@ -37,6 +84,23 @@ pub struct DataColumn<DT: DataType> {
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>, // this data is no longer requested from this Entity. Either no one wants it or something else provided it.
 	finished: HashMap<DT::Params, HashSet<Entity>>,
 	waiting: HashMap<DT::Params, HashMap<Entity, Waiter>>,
+}
+
+impl<DT: DataType> DataColumn<DT> {
+	fn best_node<'w, 's>(data_producing_node: &Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>, request: &Request<DT>) -> (f32, Entity) {
+		let mut best = (f32::MAX, None);
+		for (node, entity) in data_producing_node.iter() {
+			let Some(cost) = node.cost(request) else { continue; };
+			if best.0 > cost {
+				best.0 = cost;
+				best.1 = Some(entity);
+			}
+		}
+		let Some(entity) = best.1 else {
+			panic!("Data request failed to find node to fulfill the request. This should never happen!");
+		};
+		(best.0, entity)
+	}
 }
 
 impl<DT: DataType> Default for DataColumn<DT> {
@@ -54,15 +118,12 @@ impl<DT: DataType> DataColumn<DT> {
 	pub fn get(&self, params: &DT::Params) -> Option<&DataInfo<DT>> { self.data.get(params) }
 }
 
-#[derive(SystemParam)]
-pub struct DataRequester<'w, 's, DT: DataType> {
-	data_column: ResMut<'w, DataColumn<DT>>,
-	data_producing_node: Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>,
-}
-
-impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
-	pub fn request(&mut self, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data> {
-		if let Some(info) = self.data_column.data.get_mut(&request.params) {
+impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
+	fn cost(&self, _dyn_system_param_stuff: u32, request: &Request<DT>) -> Option<f32> {
+		self::best_node(data_producing_node, request)
+	}
+	fn request<'w>(&mut self, _dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity) -> Option<&'w DT::Data> {
+		if let Some(info) = self.data.get_mut(&request.params) {
 			if info.dirty_state.satisfies(&request.allowed_tick) {
 				if let Some(data) = &info.data {
 					info.usages.insert(requester_node);
@@ -70,41 +131,40 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 				}
 			}
 		}
-		let already_requested = self.data_column.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|waiter| waiter.allowed_tick.satisfies(&request.allowed_tick)));
+		let already_requested = self.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|waiter| waiter.allowed_tick.satisfies(&request.allowed_tick)));
 		// update requester
-		self.data_column.waiting.entry(request.params.clone()).or_default().insert(requester_node, Waiter { allowed_tick: request.allowed_tick, cache });
+		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, Waiter { allowed_tick: request.allowed_tick, true });
 		if already_requested { return None; }
 		// get node
-		let node_entity = Self::best_node(&self.data_producing_node, &request);
-		let mut node = self.data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
-		if let Some(sources) = self.data_column.data_to_drop.get_mut(&request.params) {
+		let node_entity = Self::best_node(&data_producing_node, &request);
+		let mut node = data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
+		if let Some(sources) = self.data_to_drop.get_mut(&request.params) {
 			sources.remove(&node_entity);
 		}
 		// create queue
 		node.request(request);
 		None
 	}
-
-	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
-		if let Some(waiting) = self.data_column.waiting.get_mut(params) {
+	fn cancel(&mut self, _dyn_system_param_stuff: u32, params: &DT::Params, requester_node: Entity) {
+		if let Some(waiting) = self.waiting.get_mut(params) {
 			waiting.remove(&requester_node);
 			if waiting.is_empty() {
-				self.data_column.waiting.remove(params);
+				self.waiting.remove(params);
 			}
 		}
 		let mut empty_finished = true;
-		if let Some(finished) = self.data_column.finished.get_mut(params) {
+		if let Some(finished) = self.finished.get_mut(params) {
 			finished.remove(&requester_node);
 			if finished.is_empty() {
-				self.data_column.finished.remove(params);
+				self.finished.remove(params);
 			} else {
 				empty_finished = false;
 			}
 		}
 
-		let has_waiting = self.data_column.waiting.contains_key(params);
+		let has_waiting = self.waiting.contains_key(params);
 		let source_to_drop = {
-			let Some(info) = self.data_column.data.get_mut(params) else { return; };
+			let Some(info) = self.data.get_mut(params) else { return; };
 			info.usages.remove(&requester_node);
 
 			if info.usages.is_empty() && empty_finished && !has_waiting && info.data.take().is_some() {
@@ -116,23 +176,8 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 		};
 
 		if let Some(source_entity) = source_to_drop {
-			self.data_column.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
+			self.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
 		}
-	}
-
-	fn best_node(data_producing_node: &Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>, request: &Request<DT>) -> Entity {
-		let mut best = (f32::MAX, None);
-		for (node, entity) in data_producing_node.iter() {
-			let Some(cost) = node.cost(request) else { continue; };
-			if best.0 > cost {
-				best.0 = cost;
-				best.1 = Some(entity);
-			}
-		}
-		let Some(entity) = best.1 else {
-			panic!("Data request failed to find node to fulfill the request. This should never happen!");
-		};
-		entity
 	}
 }
 
