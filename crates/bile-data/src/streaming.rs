@@ -15,6 +15,14 @@ pub struct StreamId(u64);
 // the params. But with streaming one could image that the smaller pieces of that data does not
 // match any params and instead is only a smaller piece of the params. This is a issue that does
 // not need to be fixed now but its something to think about.
+// Note: I think I solved this. I think there should be a new trait StreamingDataType Type which
+// holds a DataType and Params. This params is used to Key a set of that data type. This allows
+// something like a streaming API to not be queryable by a non streaming API, but allows the cached
+// data to be used by a non streaming API. The cache is likly to look like
+// StreamingDataType::Param -> {DataType::Param} and DataType::Param -> DataType::Data
+// This will also allow nodes that just know which DataType Params to requst for a StreamingDataType
+// Params which then requests the regulare DataType Params and passes them back like a streaming
+// node would. I think that gather is very similar and gather will also use this new data type
 
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<DT: DataType> {
