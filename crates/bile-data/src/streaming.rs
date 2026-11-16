@@ -9,7 +9,12 @@ use crate::default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, 
 pub struct StreamId(u64);
 
 // TODO: redo all of this to be like simple with the comsumer + API, data storage, and producer.
-// Then also impl a for simple so that requests made can be fullfiled by simple producers.
+// Then also impl the API for simple so that requests made can be fullfiled by simple producers.
+
+// The one weird thing is that the DataType kinda assumes that the data always has a mapping from
+// the params. But with streaming one could image that the smaller pieces of that data does not
+// match any params and instead is only a smaller piece of the params. This is a issue that does
+// not need to be fixed now but its something to think about.
 
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<DT: DataType> {

@@ -21,3 +21,10 @@
 // type of situation. Which is why I dont really want to do it because special code
 // is bad and a source of bugs. A param should peobably not depend on its self.
 // This might be fixable if we dont let diff applying use external data but idk.
+
+// Added Note:
+// I think that we may just need a table to store the dep chain of diff aplications.
+// (Producer->Appled->Appled->Appled)
+// This is special code for diffs but I think that once we get the code for this
+// correct it will allow the node impl (There are a ton of these node impls and not
+// many node types: simple, streaming. So it will not be so bad) to be way simpler.
