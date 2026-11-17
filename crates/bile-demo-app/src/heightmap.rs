@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
-use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
+use bile_data::{DataType, DirtyState, Request, diff::{self, BileRegisterDiff}, simple::{self, BileRegisterSimple}};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
@@ -10,6 +10,16 @@ const SAMPLES: usize = HEIGHTMAP_QUADS + 3;
 const TERRAIN_AMPLITUDE: f32 = 160.0;
 const OVERRIDE_STEP: f32 = 2.0;
 
+fn offset(overrides: &HashMap<IVec2, f32>, position: Vec2) -> f32 {
+	let local = position / OVERRIDE_STEP;
+	let cell = local.floor();
+	let t = local - cell;
+	let cell = cell.as_ivec2();
+	let at = |x: i32, y: i32| overrides.get(&(cell + IVec2::new(x, y))).copied().unwrap_or(0.0);
+	at(0, 0).lerp(at(1, 0), t.x).lerp(at(0, 1).lerp(at(1, 1), t.x), t.y)
+}
+
+#[derive(Clone)]
 pub struct Heights {
 	min: Vec2,
 	step: f32,
@@ -46,12 +56,7 @@ impl HeightSampler {
 
 	fn offset(&self, position: Vec2) -> f32 {
 		if self.overrides.is_empty() { return 0.0; }
-		let local = position / OVERRIDE_STEP;
-		let cell = local.floor();
-		let t = local - cell;
-		let cell = cell.as_ivec2();
-		let at = |x: i32, y: i32| self.overrides.get(&(cell + IVec2::new(x, y))).copied().unwrap_or(0.0);
-		at(0, 0).lerp(at(1, 0), t.x).lerp(at(0, 1).lerp(at(1, 1), t.x), t.y)
+		offset(&self.overrides, position)
 	}
 
 	fn heights(&self, tile_key: TileKey) -> Heights {
@@ -69,6 +74,7 @@ impl HeightSampler {
 pub struct HeightField {
 	sampler: HeightSampler,
 	edited: Vec<Rect>,
+	raised: HashMap<IVec2, f32>, // what the edits added to the overrides
 }
 
 impl HeightField {
@@ -87,18 +93,21 @@ impl HeightField {
 				if distance >= 1.0 { continue; }
 				let falloff = 1.0 - distance * distance;
 				*overrides.entry(cell).or_default() += amount * falloff * falloff;
+				*self.raised.entry(cell).or_default() += amount * falloff * falloff;
 			}
 		}
 		self.edited.push(Rect::from_center_half_size(center, Vec2::splat(radius + OVERRIDE_STEP)));
 	}
 }
 
+pub type Raised = Arc<HashMap<IVec2, f32>>; // what an edit added to the overrides
+
 pub struct Heightmap;
 
 impl DataType for Heightmap {
 	type Params = TileKey;
 	type Data = Arc<Heights>;
-	type Diff = ();
+	type Diff = Raised;
 }
 
 #[derive(Component)]
@@ -130,6 +139,19 @@ impl simple::DataProducingNode<Heightmap> for HeightmapSource {
 	}
 }
 
+impl diff::DiffApplyingNode<Heightmap> for HeightmapSource {
+	fn diff_cost(&self, _request: &Request<Heightmap>, _diffs: &[Raised]) -> Option<f32> { Some(0.5) }
+
+	fn apply(&mut self, _tile_key: &TileKey, heights: &mut Arc<Heights>, diffs: Vec<Raised>) -> bool {
+		let heights = Arc::make_mut(heights);
+		for (index, value) in heights.values.iter_mut().enumerate() {
+			let position = heights.min + Vec2::new((index % SAMPLES) as f32, (index / SAMPLES) as f32) * heights.step;
+			*value += diffs.iter().map(|raised| offset(raised, position)).sum::<f32>();
+		}
+		true
+	}
+}
+
 fn footprint(tile_key: TileKey) -> Rect {
 	let step = tile_key.size().x as f32 / HEIGHTMAP_QUADS as f32;
 	let min = tile_key.min().xz().as_vec2() - step;
@@ -143,6 +165,7 @@ fn apply_height_edits(
 ) {
 	if field.edited.is_empty() { return; }
 	let edited = std::mem::take(&mut field.edited);
+	let raised = Arc::new(std::mem::take(&mut field.raised));
 	let mut source = source.into_inner();
 	source.sampler = field.sampler.clone();
 	let touched = |tile_key: &TileKey| edited.iter().any(|rect| !footprint(*tile_key).intersect(*rect).is_empty());
@@ -152,7 +175,7 @@ fn apply_height_edits(
 		source.spawn(tile_key);
 	}
 	for tile_key in source.live.iter().filter(|tile_key| touched(tile_key)) {
-		dirtier.mark_dirty(tile_key, None);
+		dirtier.mark_dirty(tile_key, Some(&raised));
 	}
 }
 
@@ -177,8 +200,9 @@ impl Plugin for HeightmapPlugin {
 		noise.set_fractal_octaves(Some(5));
 		let sampler = HeightSampler { noise: Arc::new(noise), overrides: Arc::default() };
 		app.world_mut().spawn(HeightmapSource { sampler: sampler.clone(), live: HashSet::new(), tasks: Vec::new() });
-		app.insert_resource(HeightField { sampler, edited: Vec::new() });
+		app.insert_resource(HeightField { sampler, edited: Vec::new(), raised: HashMap::new() });
 		app.register_producer_simple::<Heightmap, HeightmapSource>()
+			.register_diff_applier::<Heightmap, HeightmapSource>()
 			.add_systems(Update, (apply_height_edits, finish_heightmaps).chain().in_set(HeightmapSystems));
 	}
 }

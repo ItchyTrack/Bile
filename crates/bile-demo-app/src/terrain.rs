@@ -13,7 +13,7 @@ use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
 
-use crate::{MainRenderingLoader, heightmap::{Heightmap, Heights}};
+use crate::{MainRenderingLoader, heightmap::{Heightmap, Heights, Raised}};
 
 pub const TILE_SIZE: u32 = 64;
 const TILE_QUADS: usize = crate::heightmap::HEIGHTMAP_QUADS;
@@ -78,7 +78,7 @@ impl simple::DataConsumingNode<Heightmap> for TerrainMeshNode {
 		self.ready.push((*tile_key, heights));
 	}
 
-	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64, _diff: Option<&()>) {
+	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64, _diff: Option<&Raised>) {
 		self.ready.retain(|(key, _)| key != tile_key);
 		self.building.retain(|(key, _)| key != tile_key);
 		self.requested.push(*tile_key);
