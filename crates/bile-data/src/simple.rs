@@ -107,8 +107,9 @@ pub struct DataDirtier<'w, 's, DT: DataType> {
 
 impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
 	pub fn mark_dirty(&mut self, params: &DT::Params, diff: Option<&DT::Diff>) {
+		let last_clean_tick = self.bile_state_tick.update(); /* Was valid on the last tick */
 		for mut data_storage in &mut self.data_storages {
-			data_storage.dirty_data(&mut self.data_consuming_nodes, params, self.bile_state_tick.current_tick() - 1 /* Was valid on the last tick */, diff);
+			data_storage.dirty_data(&mut self.data_consuming_nodes, params, last_clean_tick, diff);
 		}
 	}
 }
