@@ -54,9 +54,7 @@ unsafe impl<DT: DataType> SystemParam for DataRequester<'_, '_, DT> {
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		let api_entity = best(self.data_requesting_apis.iter().map(|(data_requesting_api, entity)| (data_requesting_api.cost(&mut self.dyn_system_params, &request), entity)))
-			.expect("Data request failed to find node to fulfill the request. This should never happen!")
-			.1;
+		let api_entity = Self::best_api(&self.data_requesting_apis, &mut self.dyn_system_params, &request);
 		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
 			if entity == api_entity { continue; }
 			data_requesting_api.cancel(&mut self.dyn_system_params, &request.params, requester_node);
@@ -68,15 +66,25 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 			data_requesting_api.cancel(&mut self.dyn_system_params, params, requester_node);
 		}
 	}
+	fn best_api(data_requesting_apis: &Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Entity {
+		let mut best = (f32::MAX, None);
+		for (data_requesting_api, entity) in data_requesting_apis.iter() {
+			let Some(cost) = data_requesting_api.cost(dyn_system_params, request) else { continue; };
+			if best.0 > cost {
+				best.0 = cost;
+				best.1 = Some(entity);
+			}
+		}
+		let Some(entity) = best.1 else {
+			panic!("Data request failed to find node to fulfill the request. This should never happen!");
+		};
+		entity
+	}
 }
 
 pub fn downcast<'a, T: SystemParam>(dyn_system_params: &'a mut [DynSystemParam]) -> T
 where T::Item<'static, 'static>: SystemParam<Item<'a, 'a> = T> + 'static {
 	dyn_system_params.iter_mut().find_map(|dyn_system_param| dyn_system_param.downcast_mut()).expect("Every API is given the param from its dyn_system_param")
-}
-
-fn best(costs: impl Iterator<Item = (Option<f32>, Entity)>) -> Option<(f32, Entity)> {
-	costs.filter_map(|(cost, entity)| Some((cost?, entity))).min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
 // Simple Producing
@@ -91,8 +99,17 @@ pub trait DataProducingNode<DT: DataType> {
 pub type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>;
 pub type DataConsumingNodes<'w, 's, DT> = Query<'w, 's, One<&'static mut dyn DataConsumingNode<DT>>>;
 
+// None if no node can fulfill the request
 pub fn best_node<DT: DataType>(data_producing_node: &DataProducingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
-	best(data_producing_node.iter().map(|(node, entity)| (node.cost(request), entity)))
+	let mut best = (f32::MAX, None);
+	for (node, entity) in data_producing_node.iter() {
+		let Some(cost) = node.cost(request) else { continue; };
+		if best.0 > cost {
+			best.0 = cost;
+			best.1 = Some(entity);
+		}
+	}
+	Some((best.0, best.1?))
 }
 
 // Every storage gets what the nodes pass and dirty, there can be any number of them and they do not know each other.
