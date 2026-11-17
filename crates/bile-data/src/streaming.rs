@@ -1,16 +1,12 @@
 use std::{collections::{HashMap, HashSet}, hash::Hash, sync::atomic::{AtomicU64, Ordering}};
 
 use bevy::{
-	ecs::{
-		change_detection::Tick,
-		system::{DynParamBuilder, DynSystemParam, DynSystemParamState, ParamBuilder, SystemAccess, SystemMeta, SystemParam, SystemParamValidationError},
-		world::{DeferredWorld, unsafe_world_cell::UnsafeWorldCell},
-	},
+	ecs::system::{DynParamBuilder, DynSystemParam, ParamBuilder, SystemParam},
 	prelude::*,
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{default::{self, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, StateTick}, simple};
+use crate::{default::{self, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, StateTick}, dyn_system_params::{DynSystemParams, HasDynSystemParam, downcast}, simple};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
@@ -62,42 +58,28 @@ pub trait DataRequestingAPI<SDT: StreamingDataType> {
 	fn cancel(&mut self, dyn_system_params: &mut [DynSystemParam], params: &SDT::Params, requester_node: Entity);
 }
 
+#[derive(SystemParam)]
 pub struct DataRequester<'w, 's, SDT: StreamingDataType> {
 	data_requesting_apis: Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<SDT>>, Entity)>,
-	dyn_system_params: Vec<DynSystemParam<'w, 's>>,
+	dyn_system_params: DynSystemParams<'w, 's, dyn DataRequestingAPI<SDT>>,
 }
 
-// SAFETY: Delegates to the tuple of its fields, only the states of the `DynSystemParam`s are built by the APIs instead of being empty.
-unsafe impl<SDT: StreamingDataType> SystemParam for DataRequester<'_, '_, SDT> {
-	type State = (QueryState<(One<&'static mut dyn DataRequestingAPI<SDT>>, Entity)>, Vec<DynSystemParamState>);
-	type Item<'w, 's> = DataRequester<'w, 's, SDT>;
-	fn init_state(world: &mut World) -> Self::State {
-		let dyn_system_params: Vec<_> = world.query::<One<&dyn DataRequestingAPI<SDT>>>().iter(world).map(|data_requesting_api| data_requesting_api.dyn_system_param()).collect();
-		(Query::init_state(world), dyn_system_params.into_iter().map(|dyn_system_param| dyn_system_param.build(world)).collect())
-	}
-	fn init_access(state: &Self::State, system_meta: &mut SystemMeta, system_access: &mut SystemAccess, world: &mut World) {
-		<(Query<_>, Vec<DynSystemParam>)>::init_access(state, system_meta, system_access, world);
-	}
-	fn apply(state: &mut Self::State, system_meta: &SystemMeta, world: &mut World) { <(Query<_>, Vec<DynSystemParam>)>::apply(state, system_meta, world); }
-	fn queue(state: &mut Self::State, system_meta: &SystemMeta, world: DeferredWorld) { <(Query<_>, Vec<DynSystemParam>)>::queue(state, system_meta, world); }
-	unsafe fn get_param<'w, 's>(state: &'s mut Self::State, system_meta: &SystemMeta, world: UnsafeWorldCell<'w>, change_tick: Tick) -> Result<Self::Item<'w, 's>, SystemParamValidationError> {
-		let (data_requesting_apis, dyn_system_params) = unsafe { <(Query<_>, Vec<DynSystemParam>)>::get_param(state, system_meta, world, change_tick) }?;
-		Ok(DataRequester { data_requesting_apis, dyn_system_params })
-	}
+impl<SDT: StreamingDataType> HasDynSystemParam for dyn DataRequestingAPI<SDT> {
+	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DataRequestingAPI::dyn_system_param(self) }
 }
 
 impl<'w, 's, SDT: StreamingDataType> DataRequester<'w, 's, SDT> {
 	pub fn request(&mut self, request: Request<SDT>, requester_node: Entity) {
-		let api_entity = Self::best_api(&self.data_requesting_apis, &mut self.dyn_system_params, &request);
+		let api_entity = Self::best_api(&self.data_requesting_apis, &mut self.dyn_system_params.0, &request);
 		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
 			if entity == api_entity { continue; }
-			data_requesting_api.cancel(&mut self.dyn_system_params, &request.params, requester_node);
+			data_requesting_api.cancel(&mut self.dyn_system_params.0, &request.params, requester_node);
 		}
-		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(&mut self.dyn_system_params, request, requester_node)
+		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(&mut self.dyn_system_params.0, request, requester_node)
 	}
 	pub fn cancel(&mut self, params: &SDT::Params, requester_node: Entity) {
 		for (mut data_requesting_api, _entity) in self.data_requesting_apis.iter_mut() {
-			data_requesting_api.cancel(&mut self.dyn_system_params, params, requester_node);
+			data_requesting_api.cancel(&mut self.dyn_system_params.0, params, requester_node);
 		}
 	}
 	fn best_api(data_requesting_apis: &Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<SDT>>, Entity)>, dyn_system_params: &mut [DynSystemParam], request: &Request<SDT>) -> Entity {
@@ -114,11 +96,6 @@ impl<'w, 's, SDT: StreamingDataType> DataRequester<'w, 's, SDT> {
 		};
 		entity
 	}
-}
-
-pub fn downcast<'a, T: SystemParam>(dyn_system_params: &'a mut [DynSystemParam]) -> T
-where T::Item<'static, 'static>: SystemParam<Item<'a, 'a> = T> + 'static {
-	dyn_system_params.iter_mut().find_map(|dyn_system_param| dyn_system_param.downcast_mut()).expect("Every API is given the param from its dyn_system_param")
 }
 
 #[bevy_trait_query::queryable]

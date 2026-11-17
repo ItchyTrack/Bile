@@ -8,7 +8,8 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::{
 	default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, StateTick},
-	streaming::{DataConsumingNodes, DataRequestingAPI, DataStorage, Request, StreamId, StreamingDataType, downcast},
+	dyn_system_params::downcast,
+	streaming::{DataConsumingNodes, DataRequestingAPI, DataStorage, Request, StreamId, StreamingDataType},
 };
 
 // Gather Producing
