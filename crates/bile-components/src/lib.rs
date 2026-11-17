@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*, transform::TransformSystems};
-use bile_data::{DataType, DirtyState, Request, simple};
+use bile_data::{DataType, DirtyState, Request, diff, simple};
 use bevy_trait_query::RegisterExt;
 
 #[cfg(test)]
@@ -38,6 +38,8 @@ impl<DT: ComponentData> Want<DT> {
 struct Wanted {
 	entities: HashSet<Entity>,
 	source_entity: Option<Entity>, // None until the requested node passed the data
+	chain: Vec<Entity>, // earlier sources, whose data a diff was applied to
+	pending: bool, // the data in the components is out of date until a node passes
 }
 
 // The storage of the wanted data. The data is only in the components of the entities that want it.
@@ -45,7 +47,7 @@ struct Wanted {
 #[derive(Resource)]
 struct ComponentStorage<DT: ComponentData> {
 	wanted: HashMap<DT::Params, Wanted>,
-	to_request: HashSet<DT::Params>,
+	dirtied: HashMap<DT::Params, Option<Vec<DT::Diff>>>, // None if the data has to be requested
 	passed: Vec<(DT::Params, DT::Data)>,
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>,
 }
@@ -54,7 +56,7 @@ impl<DT: ComponentData> Default for ComponentStorage<DT> {
 	fn default() -> Self {
 		Self {
 			wanted: HashMap::default(),
-			to_request: HashSet::default(),
+			dirtied: HashMap::default(),
 			passed: Vec::default(),
 			data_to_drop: HashMap::default(),
 		}
@@ -69,17 +71,23 @@ impl<DT: ComponentData> simple::DataStorage<DT> for ComponentStorage<DT> {
 		};
 		if !dirty_state.satisfies(&DirtyState::UpToDate) { return; }
 		if let Some(old_source_entity) = wanted.source_entity.replace(source_entity) && old_source_entity != source_entity {
-			self.data_to_drop.entry(params.clone()).or_default().insert(old_source_entity);
+			let old_sources = self.data_to_drop.entry(params.clone()).or_default();
+			old_sources.insert(old_source_entity);
+			old_sources.extend(wanted.chain.drain(..));
+			old_sources.remove(&source_entity);
 		}
+		wanted.pending = false;
 		self.passed.push((params.clone(), data.clone()));
 	}
-	fn dirty_data(&mut self, _data_consuming_nodes: &mut simple::DataConsumingNodes<DT>, params: &DT::Params, _last_clean_tick: u64, _diff: Option<&DT::Diff>) {
-		if self.wanted.contains_key(params) {
-			self.to_request.insert(params.clone());
+	fn dirty_data(&mut self, _data_consuming_nodes: &mut simple::DataConsumingNodes<DT>, params: &DT::Params, _last_clean_tick: u64, diff: Option<&DT::Diff>) {
+		let Some(wanted) = self.wanted.get(params) else { return; };
+		match (self.dirtied.entry(params.clone()).or_insert_with(|| (!wanted.pending).then(Vec::new)), diff) {
+			(Some(diffs), Some(diff)) => diffs.push(diff.clone()),
+			(diffs, _) => *diffs = None, // There may never be a dirty inbetween 2 diffs
 		}
 	}
 	fn uses(&self, params: &DT::Params, source_entity: Entity) -> bool {
-		self.wanted.get(params).is_some_and(|wanted| wanted.source_entity.is_none_or(|used| used == source_entity))
+		self.wanted.get(params).is_some_and(|wanted| wanted.source_entity.is_none_or(|used| used == source_entity) || wanted.chain.contains(&source_entity))
 	}
 	fn drop_data(&mut self) -> HashMap<DT::Params, HashSet<Entity>> { std::mem::take(&mut self.data_to_drop) }
 }
@@ -145,7 +153,9 @@ fn cancel_removed_want<DT: ComponentData>(remove: On<Remove<Want<DT>>>, wants: Q
 	let Some(wanted) = storage.wanted.get_mut(params) else { return; }; // removed before it was requested
 	wanted.entities.remove(&remove.entity);
 	if wanted.entities.is_empty() {
-		storage.data_to_drop.entry(params.clone()).or_default().extend(wanted.source_entity);
+		let sources = storage.data_to_drop.entry(params.clone()).or_default();
+		sources.extend(wanted.source_entity);
+		sources.extend(wanted.chain.drain(..));
 		storage.wanted.remove(params);
 	}
 }
@@ -154,19 +164,34 @@ fn update_wants<DT: ComponentData>(
 	mut commands: Commands,
 	component: ComponentIdFor<DT::Component>,
 	mut storage: ResMut<ComponentStorage<DT>>,
-	mut data_producing_node: simple::DataProducingNodes<DT>,
+	mut data_nodes: ParamSet<(simple::DataProducingNodes<DT>, diff::DiffApplyingNodes<DT>)>,
+	components: Query<&DT::Component>,
 	mut resolved: MessageWriter<ComponentResolved>,
 	mut wants: ParamSet<(Query<(Entity, &Want<DT>), Added<Want<DT>>>, Query<&mut Want<DT>>)>,
 ) {
 	let storage = &mut *storage;
 	for (entity, want) in &wants.p0() {
 		storage.wanted.entry(want.params.clone()).or_default().entities.insert(entity);
-		storage.to_request.insert(want.params.clone());
+		storage.dirtied.insert(want.params.clone(), None);
 	}
-	for params in storage.to_request.drain() {
-		let request = Request::new(params, DirtyState::UpToDate);
-		let node_entity = simple::best_node(&data_producing_node, &request).expect("Data request failed to find node to fulfill the request. This should never happen!").1;
-		data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0.request(request);
+	for (params, diffs) in storage.dirtied.drain() {
+		let Some(wanted) = storage.wanted.get_mut(&params) else { continue };
+		let request = Request::new(params.clone(), DirtyState::UpToDate);
+		let best_node = simple::best_node(&data_nodes.p0(), &request);
+		if let Some(diffs) = diffs && let Some((cost, node_entity)) = diff::best_node(&data_nodes.p1(), &request, &diffs) && best_node.is_none_or(|best_node| cost < best_node.0) {
+			let mut data = wanted.entities.iter().next().and_then(|&entity| components.get(entity).ok().cloned());
+			wanted.pending = !data_nodes.p1().get_mut(node_entity).expect("This must exist as it was found in best_node").0.apply(&params, &mut data, diffs);
+			if wanted.source_entity != Some(node_entity) {
+				wanted.chain.extend(wanted.source_entity.replace(node_entity));
+			}
+			if !wanted.pending {
+				storage.passed.push((params, data));
+			}
+			continue;
+		}
+		wanted.pending = true;
+		let node_entity = best_node.expect("Data request failed to find node to fulfill the request. This should never happen!").1;
+		data_nodes.p0().get_mut(node_entity).expect("This must exist as it was found in best_node").0.request(request);
 	}
 	for (params, data) in storage.passed.drain(..) {
 		let Some(wanted) = storage.wanted.get(&params) else { continue };

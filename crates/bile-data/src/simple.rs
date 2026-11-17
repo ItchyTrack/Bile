@@ -10,7 +10,7 @@ use bevy::{
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}, diff::DiffApplyingNode};
+use crate::{default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}, diff::{self, DiffApplyingNodes}};
 
 // Simple Consuming
 
@@ -180,15 +180,13 @@ impl<DT: DataType> Default for DataColumn<DT> {
 	}
 }
 
-type DiffApplyingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DiffApplyingNode<DT>>, Entity)>;
 type DataNodes<'w, 's, DT> = ParamSet<'w, 's, (DataProducingNodes<'static, 'static, DT>, DiffApplyingNodes<'static, 'static, DT>)>;
 
 impl<DT: DataType> DataColumn<DT> {
 	pub fn get(&self, params: &DT::Params) -> Option<&DataInfo<DT>> { self.data.get(params) }
 	fn best_diff(&self, diff_applying_node: &DiffApplyingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
 		let info = self.data.get(&request.params).filter(|info| info.data.is_some() && !info.dirty_state.satisfies(&request.allowed_tick))?;
-		let diffs = info.diffs.as_ref()?;
-		best(diff_applying_node.iter().map(|(node, entity)| (node.diff_cost(request, diffs), entity)))
+		diff::best_node(diff_applying_node, request, info.diffs.as_ref()?)
 	}
 }
 
