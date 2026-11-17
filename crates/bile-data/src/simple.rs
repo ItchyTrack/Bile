@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::default::{self, BileDataSchedule, BileDataSystemSet, DataRequestingAPI, DataType, DirtyState, Request, StateTick, best, downcast};
+use crate::{default::{self, BileDataSchedule, BileDataSystemSet, DataRequestingAPI, DataType, DirtyState, Request, StateTick, StreamingDataType, best, downcast}, streaming};
 
 // Simple Consuming
 
@@ -180,6 +180,55 @@ impl<DT: DataType> DataRequestingAPI<Request<DT>> for DataColumn<DT> {
 	fn cancel(&mut self, _dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity) { self.cancel(params, requester_node); }
 }
 
+// Simple Producing Data for Streaming: a stream of the one data that has the params of the stream
+
+enum Streamed<DT: DataType> {
+	Pass(DT::Params, u64, DT::Data),
+	Dirty(DT::Params, u64, Option<DT::Diff>),
+}
+
+#[derive(Component)]
+struct StreamedData<SDT: StreamingDataType>(Vec<Streamed<SDT::DataType>>);
+
+impl<DT: DataType, SDT: StreamingDataType<DataType = DT>> DataConsumingNode<DT> for StreamedData<SDT> {
+	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data) { self.0.push(Streamed::Pass(params.clone(), tick, data)); }
+	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>) { self.0.push(Streamed::Dirty(params.clone(), last_clean_tick, diff.cloned())); }
+}
+
+impl<DT: DataType, SDT: StreamingDataType<DataType = DT, Params = DT::Params>> DataRequestingAPI<streaming::Request<SDT>> for DataColumn<DT> {
+	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<(DataProducingNodes<DT>, Commands)>(ParamBuilder) }
+	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &streaming::Request<SDT>) -> Option<f32> {
+		let (data_producing_node, _): (DataProducingNodes<DT>, Commands) = downcast(dyn_system_params);
+		let request = Request::new(request.params.clone(), request.allowed_tick);
+		best(data_producing_node.iter().map(|(node, entity)| (node.cost(&request), entity))).map(|best| best.0)
+	}
+	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: streaming::Request<SDT>, requester_node: Entity) {
+		let (mut data_producing_node, mut commands): (DataProducingNodes<DT>, Commands) = downcast(dyn_system_params);
+		commands.entity(requester_node).entry::<StreamedData<SDT>>().or_insert_with(|| StreamedData(Vec::new()));
+		if let Some(data) = self.request(&mut data_producing_node, Request::new(request.params.clone(), request.allowed_tick), requester_node) {
+			self.finished.entry(request.params).or_insert_with(|| (HashSet::default(), data)).0.insert(requester_node);
+		}
+	}
+	fn cancel(&mut self, _dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity) { self.cancel(params, requester_node); }
+}
+
+fn pass_streamed_data<SDT: StreamingDataType<Params = <<SDT as StreamingDataType>::DataType as DataType>::Params>>(
+	mut data_consuming_nodes: Query<(&mut StreamedData<SDT>, One<&mut dyn streaming::DataConsumingNode<SDT>>), Changed<StreamedData<SDT>>>,
+) {
+	for (mut streamed_data, mut data_consuming_node) in &mut data_consuming_nodes {
+		for streamed in streamed_data.bypass_change_detection().0.drain(..) {
+			match streamed {
+				Streamed::Pass(params, tick, data) => {
+					data_consuming_node.start_data(&params, tick);
+					data_consuming_node.push_data(&params, &params, data);
+					data_consuming_node.finish_data(&params);
+				}
+				Streamed::Dirty(params, last_clean_tick, diff) => data_consuming_node.dirty_data(&params, last_clean_tick, diff.as_ref()),
+			}
+		}
+	}
+}
+
 #[derive(SystemParam)]
 pub struct DataDirtier<'w, 's, DT: DataType> {
 	bile_state_tick: Res<'w, StateTick>,
@@ -265,6 +314,8 @@ pub trait BileRegisterSimple {
     where DT: DataType, C: Component + DataProducingNode<DT>;
 	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
     where DT: DataType, C: Component + DataConsumingNode<DT>;
+	fn register_streaming_simple<SDT>(&mut self) -> &mut Self
+    where SDT: StreamingDataType<Params = <<SDT as StreamingDataType>::DataType as DataType>::Params>;
 }
 
 impl BileRegisterSimple for App {
@@ -281,6 +332,16 @@ impl BileRegisterSimple for App {
     {
         self.register_component_as::<dyn DataConsumingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);
+        self
+    }
+
+    fn register_streaming_simple<SDT>(&mut self) -> &mut Self
+    where SDT: StreamingDataType<Params = <<SDT as StreamingDataType>::DataType as DataType>::Params>,
+    {
+        self.register_component_as::<dyn DataRequestingAPI<streaming::Request<SDT>>, DataColumn<SDT::DataType>>()
+			.register_component_as::<dyn DataConsumingNode<SDT::DataType>, StreamedData<SDT>>()
+			.add_systems(BileDataSchedule, pass_streamed_data::<SDT>.in_set(BileDataSystemSet::PassData).after(pass_data::<SDT::DataType, true>));
+		setup_bevy_resources::<SDT::DataType>(self);
         self
     }
 }

@@ -11,8 +11,6 @@ use crate::default::{self, ApiRequest, BileDataSchedule, BileDataSystemSet, Data
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
 
-// TODO: impl the API for simple so that requests made can be fullfiled by simple producers.
-
 // The one weird thing is that the DataType kinda assumes that the data always has a mapping from
 // the params. But with streaming one could image that the smaller pieces of that data does not
 // match any params and instead is only a smaller piece of the params. This is a issue that does
