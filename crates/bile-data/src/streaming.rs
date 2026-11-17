@@ -120,9 +120,10 @@ pub trait DataStorage<SDT: StreamingDataType> {
 	fn drop_data(&mut self) -> HashMap<SDT::Params, HashSet<Entity>>; // the nodes this storage no longer uses
 }
 
-/// Tracks whichever stream is currently accepted for a given `params`. Kept
-/// around even after `finish` (with `live = false`) purely so a later, staler
-/// stream has something fresher to be compared against and rejected by.
+/// Tracks whichever stream is currently accepted for a given `params`. After
+/// `finish` (with `live = false`) it is kept only while something still uses it
+/// or waits for it, so that late requesters get the replay and a staler stream
+/// is rejected. The cancel of its last user releases it and drops its source.
 struct StreamState<SDT: StreamingDataType> {
 	stream_id: StreamId,
 	source_entity: Entity,
@@ -204,7 +205,7 @@ impl<SDT: StreamingDataType> DataRequestingAPI<SDT> for DataColumn<SDT> {
 		let Some(stream) = self.streams.get_mut(params) else { return; };
 		stream.usages.remove(&requester_node);
 		let source_entity = stream.source_entity;
-		if stream.live && stream.usages.is_empty() && !self.waiting.contains_key(params) {
+		if stream.usages.is_empty() && !self.waiting.contains_key(params) {
 			self.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
 			self.streams.remove(params);
 		}

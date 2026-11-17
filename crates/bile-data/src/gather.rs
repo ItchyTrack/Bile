@@ -27,9 +27,11 @@ type DataProducingNodes<'w, 's, SDT> = Query<'w, 's, (One<&'static mut dyn DataP
 
 // Gather Producing Data
 
-/// Tracks whichever stream is currently accepted for a given `params`. Kept
-/// around even after `finish` (with `live` empty) purely so a later, staler
-/// stream has something fresher to be compared against and rejected by.
+/// Tracks whichever stream is currently accepted for a given `params`. After
+/// every source finished (with `live` empty) it is kept only while something
+/// still uses it or waits for it, so that late requesters get the replay and a
+/// staler stream is rejected. The cancel of its last user releases it and drops
+/// its sources.
 struct StreamState<SDT: StreamingDataType> {
 	stream_id: StreamId,
 	sources: HashSet<Entity>,
@@ -115,7 +117,7 @@ impl<SDT: StreamingDataType> DataRequestingAPI<SDT> for DataColumn<SDT> {
 			return;
 		};
 		stream.usages.remove(&requester_node);
-		if !stream.live.is_empty() && stream.usages.is_empty() && !self.waiting.contains_key(params) {
+		if stream.usages.is_empty() && !self.waiting.contains_key(params) {
 			self.data_to_drop.entry(params.clone()).or_default().extend(std::mem::take(&mut stream.sources));
 			self.streams.remove(params);
 			self.requested.remove(params);
