@@ -1,97 +1,19 @@
 use bevy::ecs::system::RunSystemOnce;
 
-use std::collections::HashSet;
-
 use crate::{diff::BileRegisterDiff, gather::BileRegisterGather, simple::{self, BileRegisterSimple}, streaming::{self, BileRegisterStreaming, StreamingDataType}, *};
 
-struct Num;
-impl DataType for Num {
+struct Parts;
+impl StreamingDataType for Parts {
 	type Params = u32;
 	type Data = u32;
 	type Diff = ();
 }
-struct Nums;
-impl StreamingDataType for Nums {
-	type DataType = Num;
-	type Params = u32;
-}
-
-#[derive(Component, Default)]
-struct Producer(Vec<u32>, Vec<u32>);
-impl simple::DataProducingNode<Num> for Producer {
-	fn cost(&self, _request: &Request<Num>) -> Option<f32> { Some(1.0) }
-	fn request(&mut self, request: Request<Num>) { self.0.push(request.params); }
-	fn drop(&mut self, params: &u32) { self.1.push(*params); }
-}
-
-#[derive(Component)]
-struct Tens;
-impl streaming::DataParamsNode<Nums> for Tens {
-	fn cost(&self, _request: &streaming::Request<Nums>) -> Option<f32> { Some(1.0) }
-	fn params(&self, params: &u32) -> HashSet<u32> { HashSet::from([params * 10, params * 10 + 1]) }
-}
 
 #[derive(Component, Default)]
 struct Consumer(Vec<String>);
-impl streaming::DataConsumingNode<Nums> for Consumer {
-	fn start_data(&mut self, params: &u32, _tick: u64) { self.0.push(format!("start {params}")); }
-	fn push_data(&mut self, params: &u32, data_params: &u32, data: u32) { self.0.push(format!("push {params} {data_params} {data}")); }
-	fn finish_data(&mut self, params: &u32) { self.0.push(format!("finish {params}")); }
-	fn dirty_data(&mut self, params: &u32, _tick: u64, _diff: Option<&()>) { self.0.push(format!("dirty {params}")); }
-}
-
-fn request(app: &mut App, entity: Entity) {
-	app.world_mut()
-		.run_system_once(move |mut requester: streaming::DataRequester<Nums>| requester.request(streaming::Request { params: 3, allowed_tick: DirtyState::UpToDate }, entity))
-		.unwrap();
-}
-
-fn sorted<T: Ord>(mut values: Vec<T>) -> Vec<T> {
-	values.sort();
-	values
-}
-
-#[test]
-fn simple_producers_fulfil_streams() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_producer_simple::<Num, Producer>().register_consumer_streaming::<Nums, Consumer>().register_params_streaming::<Nums, Tens>();
-	let producer = app.world_mut().spawn(Producer::default()).id();
-	app.world_mut().spawn(Tens);
-	let a = app.world_mut().spawn(Consumer::default()).id();
-	let b = app.world_mut().spawn(Consumer::default()).id();
-	request(&mut app, a);
-	assert_eq!(sorted(app.world().get::<Producer>(producer).unwrap().0.clone()), vec![30, 31]);
-	app.world_mut().run_system_once(move |mut passer: simple::DataPasser<Num>| passer.pass_data(producer, &30, DirtyState::UpToDate, 300)).unwrap();
-	app.update();
-	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 30 300"]);
-	app.world_mut().run_system_once(move |mut passer: simple::DataPasser<Num>| passer.pass_data(producer, &31, DirtyState::UpToDate, 310)).unwrap();
-	app.update();
-	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 30 300", "push 3 31 310", "finish 3"]);
-	// the data is cached by simple, so nothing is produced again
-	request(&mut app, b);
-	app.update();
-	let events = &app.world().get::<Consumer>(b).unwrap().0;
-	assert_eq!((events[0].as_str(), events[3].as_str()), ("start 3", "finish 3"));
-	assert_eq!(sorted(events[1..3].to_vec()), vec!["push 3 30 300", "push 3 31 310"]);
-	assert_eq!(app.world().get::<Producer>(producer).unwrap().0.len(), 2);
-	app.world_mut().run_system_once(|mut dirtier: simple::DataDirtier<Num>| dirtier.mark_dirty(&31, None)).unwrap();
-	app.update();
-	assert_eq!(app.world().get::<Consumer>(a).unwrap().0.last().unwrap(), "dirty 3");
-	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Nums>| { requester.cancel(&3, a); requester.cancel(&3, b); }).unwrap();
-	app.update();
-	assert_eq!(sorted(app.world().get::<Producer>(producer).unwrap().1.clone()), vec![30, 31]);
-}
-
-struct Parts;
-impl StreamingDataType for Parts {
-	type DataType = Num;
-	type Params = u32;
-}
-
 impl streaming::DataConsumingNode<Parts> for Consumer {
 	fn start_data(&mut self, params: &u32, _tick: u64) { self.0.push(format!("start {params}")); }
-	fn push_data(&mut self, params: &u32, data_params: &u32, data: u32) { self.0.push(format!("push {params} {data_params} {data}")); }
+	fn push_data(&mut self, params: &u32, data: u32) { self.0.push(format!("push {params} {data}")); }
 	fn finish_data(&mut self, params: &u32) { self.0.push(format!("finish {params}")); }
 	fn dirty_data(&mut self, params: &u32, _tick: u64, _diff: Option<&()>) { self.0.push(format!("dirty {params}")); }
 }
@@ -103,6 +25,7 @@ impl streaming::DataProducingNode<Parts> for StreamProducer {
 	fn request(&mut self, request: streaming::Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
 	fn drop(&mut self, params: &u32) { self.1.push(*params); }
 }
+
 #[derive(Component, Default)]
 struct GatherProducer(Vec<(u32, streaming::StreamId)>, Vec<u32>, Option<f32>);
 impl gather::DataProducingNode<Parts> for GatherProducer {
@@ -117,6 +40,10 @@ fn request_parts(app: &mut App, entity: Entity) {
 		.unwrap();
 }
 
+fn events(app: &App, entity: Entity) -> Vec<&str> {
+	app.world().get::<Consumer>(entity).unwrap().0.iter().map(String::as_str).collect()
+}
+
 #[test]
 fn streaming_producer_streams() {
 	let mut app = App::new();
@@ -125,21 +52,40 @@ fn streaming_producer_streams() {
 	let producer = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(1.0))).id();
 	app.world_mut().spawn(StreamProducer(vec![], vec![], Some(2.0)));
 	let a = app.world_mut().spawn(Consumer::default()).id();
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	let c = app.world_mut().spawn(Consumer::default()).id();
 	request_parts(&mut app, a);
 	let (params, id) = app.world().get::<StreamProducer>(producer).unwrap().0[0];
 	assert_eq!(params, 3);
 	app.world_mut()
 		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
 			passer.start(producer, &3, id, DirtyState::UpToDate);
-			passer.push(producer, &3, id, 1, 10);
-			passer.push(producer, &3, id, 2, 20);
+			passer.push(producer, &3, id, 10);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10"]);
+	// a requester that is late gets what was already streamed and then the rest
+	request_parts(&mut app, b);
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.push(producer, &3, id, 20);
 			passer.finish(producer, &3, id);
 		})
 		.unwrap();
 	app.update();
-	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 1 10", "push 3 2 20", "finish 3"]);
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
+	assert_eq!(events(&app, b), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
+	// also after the stream finished
+	request_parts(&mut app, c);
+	app.update();
+	assert_eq!(events(&app, c), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
+	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().0.len(), 1);
 	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
-	assert_eq!(app.world().get::<Consumer>(a).unwrap().0.last().unwrap(), "dirty 3");
+	assert_eq!(*events(&app, a).last().unwrap(), "dirty 3");
+	// dirty data is not replayed
+	request_parts(&mut app, a);
+	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().0.len(), 2);
 }
 
 #[test]
@@ -151,6 +97,7 @@ fn gather_requests_every_node() {
 	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
 	let z = app.world_mut().spawn(GatherProducer(vec![], vec![], None)).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
+	let b = app.world_mut().spawn(Consumer::default()).id();
 	request_parts(&mut app, a);
 	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
 	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, id)]);
@@ -158,22 +105,24 @@ fn gather_requests_every_node() {
 	app.world_mut()
 		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
 			passer.start(x, &3, id, DirtyState::UpToDate);
-			passer.push(x, &3, id, 1, 10);
+			passer.push(x, &3, id, 10);
 			passer.finish(x, &3, id);
-			passer.push(x, &3, id, 9, 90);
+			passer.push(x, &3, id, 90);
 		})
 		.unwrap();
 	app.update();
-	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 1 10"]);
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10"]);
+	request_parts(&mut app, b);
 	app.world_mut()
 		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
 			passer.start(y, &3, id, DirtyState::UpToDate);
-			passer.push(y, &3, id, 2, 20);
+			passer.push(y, &3, id, 20);
 		})
 		.unwrap();
-	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| { requester.cancel(&3, a); requester.cancel(&3, b); }).unwrap();
 	app.update();
-	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 1 10", "push 3 2 20"]);
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "push 3 20"]);
+	assert_eq!(events(&app, b), vec!["start 3", "push 3 10", "push 3 20"]);
 	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
 	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
 	assert!(app.world().get::<GatherProducer>(z).unwrap().1.is_empty());
