@@ -10,7 +10,7 @@ use bevy::{
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, StateTick};
+use crate::{default::{self, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, StateTick}, simple};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
@@ -342,9 +342,126 @@ fn setup_bevy_resources<SDT: StreamingDataType>(app: &mut App) {
 		.register_component_as::<dyn DataRequestingAPI<SDT>, DataColumn<SDT>>();
 }
 
+// The API for simple: the stream of a params is the set of DataType data that a node knows the params of.
+// StreamingDataType::Param -> {DataType::Param} is cached here and DataType::Param -> DataType::Data by simple.
+
+#[bevy_trait_query::queryable]
+pub trait DataParamsNode<SDT: StreamingDataType> {
+	fn cost(&self, request: &Request<SDT>) -> Option<f32>; // None if the node does not know the params of the request
+	fn params(&self, params: &SDT::Params) -> HashSet<<SDT::DataType as DataType>::Params>;
+}
+
+type SimpleParams<'w, 's, SDT> = (simple::DataRequester<'w, 's, <SDT as StreamingDataType>::DataType>, Query<'w, 's, One<&'static dyn DataParamsNode<SDT>>>, Single<'w, 's, Entity, With<SimpleDataColumn<SDT>>>);
+
+struct SimpleStream<SDT: StreamingDataType> {
+	data_params: HashSet<<SDT::DataType as DataType>::Params>,
+	waiting: HashMap<Entity, HashSet<<SDT::DataType as DataType>::Params>>, // what each requester has not been pushed yet
+}
+
+enum SimpleEvent<SDT: StreamingDataType> {
+	Start,
+	Push(<SDT::DataType as DataType>::Params, <SDT::DataType as DataType>::Data),
+	Finish,
+	Dirty(u64, Option<<SDT::DataType as DataType>::Diff>),
+}
+
+#[derive(Resource)]
+pub struct SimpleDataColumn<SDT: StreamingDataType> {
+	streams: HashMap<SDT::Params, SimpleStream<SDT>>,
+	events: Vec<(Entity, SDT::Params, SimpleEvent<SDT>)>,
+}
+
+impl<SDT: StreamingDataType> Default for SimpleDataColumn<SDT> {
+	fn default() -> Self {
+		Self {
+			streams: HashMap::default(),
+			events: Vec::default(),
+		}
+	}
+}
+
+impl<SDT: StreamingDataType> DataRequestingAPI<SDT> for SimpleDataColumn<SDT> {
+	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<SimpleParams<SDT>>(ParamBuilder) }
+	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<SDT>) -> Option<f32> {
+		let (_, data_params_nodes, _): SimpleParams<SDT> = downcast(dyn_system_params);
+		data_params_nodes.iter().filter_map(|node| node.cost(request)).reduce(f32::min)
+	}
+	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<SDT>, requester_node: Entity) {
+		let (mut data_requester, data_params_nodes, entity): SimpleParams<SDT> = downcast(dyn_system_params);
+		let stream = self.streams.entry(request.params.clone()).or_insert_with(|| {
+			let node = data_params_nodes.iter().filter_map(|node| Some((node.cost(&request)?, node))).min_by(|a, b| a.0.total_cmp(&b.0));
+			SimpleStream { data_params: node.expect("Data request failed to find node to fulfill the request. This should never happen!").1.params(&request.params), waiting: HashMap::default() }
+		});
+		self.events.push((requester_node, request.params.clone(), SimpleEvent::Start));
+		let mut waiting = HashSet::default();
+		for data_params in &stream.data_params {
+			match data_requester.request(default::Request::new(data_params.clone(), request.allowed_tick), *entity) {
+				Some(data) => self.events.push((requester_node, request.params.clone(), SimpleEvent::Push(data_params.clone(), data))),
+				None => { waiting.insert(data_params.clone()); }
+			}
+		}
+		if waiting.is_empty() {
+			self.events.push((requester_node, request.params, SimpleEvent::Finish));
+		}
+		stream.waiting.insert(requester_node, waiting);
+	}
+	fn cancel(&mut self, dyn_system_params: &mut [DynSystemParam], params: &SDT::Params, requester_node: Entity) {
+		let (mut data_requester, _, entity): SimpleParams<SDT> = downcast(dyn_system_params);
+		self.events.retain(|(event_entity, event_params, _)| *event_entity != requester_node || event_params != params);
+		let Some(stream) = self.streams.get_mut(params) else { return; };
+		stream.waiting.remove(&requester_node);
+		if !stream.waiting.is_empty() { return; }
+		let stream = self.streams.remove(params).expect("It was just found");
+		for data_params in stream.data_params {
+			if self.streams.values().any(|stream| stream.data_params.contains(&data_params)) { continue; }
+			data_requester.cancel(&data_params, *entity);
+		}
+	}
+}
+
+impl<SDT: StreamingDataType> simple::DataConsumingNode<SDT::DataType> for SimpleDataColumn<SDT> {
+	fn pass_data(&mut self, data_params: &<SDT::DataType as DataType>::Params, _tick: u64, data: <SDT::DataType as DataType>::Data) {
+		for (params, stream) in &mut self.streams {
+			for (&entity, waiting) in &mut stream.waiting {
+				if !waiting.remove(data_params) { continue; }
+				self.events.push((entity, params.clone(), SimpleEvent::Push(data_params.clone(), data.clone())));
+				if waiting.is_empty() {
+					self.events.push((entity, params.clone(), SimpleEvent::Finish));
+				}
+			}
+		}
+	}
+	fn dirty_data(&mut self, data_params: &<SDT::DataType as DataType>::Params, last_clean_tick: u64, diff: Option<&<SDT::DataType as DataType>::Diff>) {
+		for (params, stream) in &self.streams {
+			if !stream.data_params.contains(data_params) { continue; }
+			for &entity in stream.waiting.keys() {
+				self.events.push((entity, params.clone(), SimpleEvent::Dirty(last_clean_tick, diff.cloned())));
+			}
+		}
+	}
+}
+
+pub fn pass_simple_data<SDT: StreamingDataType>(
+	bile_state_tick: Res<StateTick>,
+	mut data_column: ResMut<SimpleDataColumn<SDT>>,
+	mut data_consuming_nodes: Query<One<&'static mut dyn DataConsumingNode<SDT>>>,
+) {
+	for (entity, params, event) in data_column.events.drain(..) {
+		let Ok(mut node) = data_consuming_nodes.get_mut(entity) else { continue; };
+		match event {
+			SimpleEvent::Start => node.start_data(&params, bile_state_tick.current_tick()),
+			SimpleEvent::Push(data_params, data) => node.push_data(&params, &data_params, data),
+			SimpleEvent::Finish => node.finish_data(&params),
+			SimpleEvent::Dirty(last_clean_tick, diff) => node.dirty_data(&params, last_clean_tick, diff.as_ref()),
+		}
+	}
+}
+
 pub trait BileRegisterStreaming {
 	fn register_producer_streaming<SDT, C>(&mut self) -> &mut Self
 	where SDT: StreamingDataType, C: Component + DataProducingNode<SDT>;
+	fn register_params_streaming<SDT, C>(&mut self) -> &mut Self
+	where SDT: StreamingDataType, C: Component + DataParamsNode<SDT>;
 	fn register_consumer_streaming<SDT, C>(&mut self) -> &mut Self
 	where SDT: StreamingDataType, C: Component + DataConsumingNode<SDT>;
 }
@@ -364,5 +481,16 @@ impl BileRegisterStreaming for App {
 		self.register_component_as::<dyn DataConsumingNode<SDT>, C>();
 		setup_bevy_resources::<SDT>(self);
 		self
+	}
+
+	fn register_params_streaming<SDT, C>(&mut self) -> &mut Self
+	where SDT: StreamingDataType, C: Component + DataParamsNode<SDT>,
+	{
+		self.register_component_as::<dyn DataParamsNode<SDT>, C>();
+		if self.world().contains_resource::<SimpleDataColumn<SDT>>() { return self; }
+		self.add_systems(BileDataSchedule, pass_simple_data::<SDT>.in_set(BileDataSystemSet::PassData).after(simple::pass_data::<SDT::DataType>))
+			.init_resource::<SimpleDataColumn<SDT>>()
+			.register_component_as::<dyn DataRequestingAPI<SDT>, SimpleDataColumn<SDT>>()
+			.register_component_as::<dyn simple::DataConsumingNode<SDT::DataType>, SimpleDataColumn<SDT>>()
 	}
 }
