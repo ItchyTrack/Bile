@@ -60,11 +60,6 @@ impl<DT: DataType> Request<DT> {
 	}
 }
 
-
-fn update_bile_state_tick(bile_state_tick: Res<StateTick>) {
-	bile_state_tick.update();
-}
-
 #[derive(ScheduleLabel, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BileDataSchedule;
 
@@ -94,6 +89,5 @@ impl Plugin for BileDataDefaultPlugin {
 		);
 
 		app.init_resource::<StateTick>();
-		app.add_systems(BileDataSchedule, update_bile_state_tick.in_set(BileDataSystemSet::UpdateStateTick));
 	}
 }
