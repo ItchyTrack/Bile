@@ -16,7 +16,7 @@ pub trait DataConsumingNode<DT: DataType> {
 #[bevy_trait_query::queryable]
 pub trait DataRequestingAPI<DT: DataType> {
 	fn cost(&self, dyn_system_param_stuff: u32, request: &Request<DT>) -> Option<f32>;
-	fn request<'w>(&mut self, dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity) -> Option<&'w DT::Data>;
+	fn request(&mut self, dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data>;
 	fn cancel(&mut self, dyn_system_param_stuff: u32, params: &DT::Params, requester_node: Entity);
 }
 
@@ -27,17 +27,17 @@ pub struct DataRequester<'w, 's, DT: DataType> {
 }
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
-	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<&'w DT::Data> {
+	pub fn request(&mut self, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data> {
 		let api_entity = Self::best_api(&self.data_requesting_apis, &request);
 		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
 			if entity == api_entity { continue; }
 			data_requesting_api.cancel(0, &request.params, requester_node);
 		}
-		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(0, request, requester_node)
+		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(0, request, requester_node, cache)
 	}
-	pub fn cancel(&mut self, params: DT::Params, requester_node: Entity) {
+	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
 		for (mut data_requesting_api, _entity) in self.data_requesting_apis.iter_mut() {
-			data_requesting_api.cancel(0, &params, requester_node);
+			data_requesting_api.cancel(0, params, requester_node);
 		}
 	}
 	fn best_api(data_requesting_apis: &Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>, request: &Request<DT>) -> Entity {
@@ -120,9 +120,9 @@ impl<DT: DataType> DataColumn<DT> {
 
 impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
 	fn cost(&self, _dyn_system_param_stuff: u32, request: &Request<DT>) -> Option<f32> {
-		self::best_node(data_producing_node, request)
+		Some(Self::best_node(data_producing_node, request).0)
 	}
-	fn request<'w>(&mut self, _dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity) -> Option<&'w DT::Data> {
+	fn request(&mut self, _dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data> {
 		if let Some(info) = self.data.get_mut(&request.params) {
 			if info.dirty_state.satisfies(&request.allowed_tick) {
 				if let Some(data) = &info.data {
@@ -133,10 +133,10 @@ impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
 		}
 		let already_requested = self.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|waiter| waiter.allowed_tick.satisfies(&request.allowed_tick)));
 		// update requester
-		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, Waiter { allowed_tick: request.allowed_tick, true });
+		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, Waiter { allowed_tick: request.allowed_tick, cache });
 		if already_requested { return None; }
 		// get node
-		let node_entity = Self::best_node(&data_producing_node, &request);
+		let node_entity = Self::best_node(&data_producing_node, &request).1;
 		let mut node = data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
 		if let Some(sources) = self.data_to_drop.get_mut(&request.params) {
 			sources.remove(&node_entity);
@@ -327,7 +327,8 @@ fn setup_bevy_resources<DT: DataType>(app: &mut App) {
 			pass_data::<DT>.in_set(BileDataSystemSet::PassData),
 			drop_data::<DT>.in_set(BileDataSystemSet::DropData),
 		))
-		.init_resource::<DataColumn<DT>>();
+		.init_resource::<DataColumn<DT>>()
+		.register_component_as::<dyn DataRequestingAPI<DT>, DataColumn<DT>>();
 }
 
 pub trait BileRegisterSimple {
