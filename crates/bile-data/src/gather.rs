@@ -12,7 +12,6 @@ impl<SDT: StreamingDataType> streaming::Producers<SDT> for dyn DataProducingNode
 	const GATHER: bool = true;
 }
 
-pub type DataColumn<SDT> = streaming::DataColumn<SDT, dyn DataProducingNode<SDT>>;
 pub type DataDirtier<'w, 's, SDT> = streaming::DataDirtier<'w, 's, SDT, dyn DataProducingNode<SDT>>;
 pub type DataPasser<'w, SDT> = streaming::DataPasser<'w, SDT, dyn DataProducingNode<SDT>>;
 

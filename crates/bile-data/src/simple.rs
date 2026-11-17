@@ -187,7 +187,7 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 impl<DT: DataType> DataColumn<DT> {
 	fn best_diff(&self, diff_applying_node: &DiffApplyingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
 		let info = self.data.get(&request.params).filter(|info| info.data.is_some() && !info.dirty_state.satisfies(&request.allowed_tick))?;
-		let diffs = info.diffs.as_ref().filter(|diffs| !diffs.is_empty())?;
+		let diffs = info.diffs.as_ref()?;
 		best(diff_applying_node.iter().map(|(node, entity)| (node.cost(request, diffs), entity)))
 	}
 }

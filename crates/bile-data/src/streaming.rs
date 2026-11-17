@@ -64,7 +64,7 @@ impl<SDT: StreamingDataType> Producers<SDT> for dyn DataProducingNode<SDT> {
 type DataProducingNodes<'w, 's, P> = Query<'w, 's, (One<&'static mut P>, Entity)>;
 
 /// Tracks whichever stream is currently accepted for a given `params`. Kept
-/// around even after `finish` (with `live = false`) purely so a later, staler
+/// around even after `finish` (with `live` empty) purely so a later, staler
 /// stream has something fresher to be compared against and rejected by.
 struct StreamState {
 	stream_id: StreamId,
