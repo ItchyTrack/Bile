@@ -23,7 +23,7 @@ debug = true
 [workspace.dependencies]
 bevy = "0.20"
 bevy_ecs = "0.20"
-bevy-trait-query = { git = "https://github.com/AwfulToTheEar/bevy-trait-query", rev = "0cd93ce9a8e24c1aa639e758e8f13131ff35916e" }
+bevy-trait-query = { git = "https://github.com/niknal357/bevy-trait-query", rev = "ce674cb52085dc169d06b1efadb02c6c3e92fcc0" }
 crossbeam-channel = "0.5.15"
 downcast-rs = "2.0.1"
 wgpu = "29.0.3"

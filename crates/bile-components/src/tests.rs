@@ -1,5 +1,5 @@
 use bevy::ecs::system::RunSystemOnce;
-use bile_data::{BileDataPlugin, simple::{self, BileRegisterSimple}};
+use bile_data::{BileDataPlugin, diff::{self, BileRegisterDiff}, simple::{self, BileRegisterSimple}};
 
 use crate::*;
 
@@ -11,7 +11,7 @@ struct Num;
 impl DataType for Num {
 	type Params = u32;
 	type Data = Option<Value>;
-	type Diff = ();
+	type Diff = u32;
 }
 
 impl ComponentData for Num {
@@ -129,4 +129,48 @@ fn component_can_only_come_from_one_data_type() {
 	let (mut app, _, entity) = setup();
 	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
 	want::<OtherNum>(&mut app.world_mut().entity_mut(entity), 3);
+}
+
+#[derive(Component)]
+struct Adder;
+
+impl simple::DataProducingNode<Num> for Adder {
+	fn cost(&self, _request: &Request<Num>) -> Option<f32> { None }
+	fn request(&mut self, _request: Request<Num>) { unreachable!() }
+	fn drop(&mut self, _params: &u32) {}
+}
+
+impl diff::DiffApplyingNode<Num> for Adder {
+	fn diff_cost(&self, _request: &Request<Num>, _diffs: &[u32]) -> Option<f32> { Some(0.5) }
+	fn apply(&mut self, _params: &u32, data: &mut Option<Value>, diffs: Vec<u32>) -> bool {
+		data.as_mut().unwrap().0 += diffs.iter().sum::<u32>();
+		true
+	}
+}
+
+fn dirty(app: &mut App, diff: Option<u32>) {
+	app.world_mut().run_system_once(move |mut dirtier: simple::DataDirtier<Num>| dirtier.mark_dirty(&3, diff.as_ref())).unwrap();
+}
+
+#[test]
+fn diffs_are_applied_to_the_component() {
+	let (mut app, producer, entity) = setup();
+	app.register_diff_applier::<Num, Adder>();
+	app.world_mut().spawn(Adder);
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	app.update();
+	pass(&mut app, producer, 3, Some(Value(30)));
+	app.update();
+	dirty(&mut app, Some(5));
+	dirty(&mut app, Some(2));
+	app.update();
+	assert_eq!(app.world().get::<Value>(entity), Some(&Value(37)));
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().requests, vec![3]);
+	// a dirty without a diff ends the run and the data is requested again
+	dirty(&mut app, Some(1));
+	dirty(&mut app, None);
+	app.update();
+	assert_eq!(app.world().get::<Value>(entity), Some(&Value(37)));
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().requests, vec![3, 3]);
+	assert!(app.world().get::<Producer>(producer).unwrap().drops.is_empty());
 }

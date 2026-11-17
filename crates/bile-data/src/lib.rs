@@ -1,4 +1,7 @@
 pub mod default;
+pub mod diff;
+pub mod dyn_system_params;
+pub mod gather;
 pub mod simple;
 pub mod streaming;
 
@@ -20,3 +23,5 @@ impl Plugin for BileDataPlugin {
 		app.add_plugins(BileDataDefaultPlugin);
 	}
 }
+#[cfg(test)]
+mod tests;

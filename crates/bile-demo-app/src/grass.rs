@@ -11,7 +11,7 @@ use bile_components::{AddComponentData, ComponentData};
 use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
-use crate::{heightmap::{Heightmap, Heights}, terrain::TerrainClass};
+use crate::{heightmap::{Heightmap, Heights, Raised}, terrain::TerrainClass};
 
 const BLADES_PER_TILE: u32 = 6000;
 const BLADE_HEIGHT: f32 = 0.9;
@@ -68,7 +68,7 @@ impl simple::DataConsumingNode<Heightmap> for GrassMeshNode {
 		self.ready.push((*tile_key, heights));
 	}
 
-	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64, _diff: Option<&()>) {
+	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64, _diff: Option<&Raised>) {
 		self.ready.retain(|(key, _)| key != tile_key);
 		self.building.retain(|(key, _)| key != tile_key);
 		self.requested.push(*tile_key);
@@ -94,7 +94,7 @@ fn update_grass_meshes(
 		heightmaps.cancel(&tile_key, entity);
 	}
 	for tile_key in std::mem::take(&mut node.requested) {
-		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity, true) {
+		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
 			node.ready.push((tile_key, heights));
 		}
 	}
