@@ -10,6 +10,7 @@ use bevy::{
 	},
 	prelude::*,
 };
+use bevy_trait_query::One;
 
 #[derive(Resource, Default)]
 pub struct StateTick {
@@ -91,16 +92,16 @@ pub trait DataRequestingAPI<R: ApiRequest> {
 }
 
 pub struct DataRequester<'w, 's, R: ApiRequest> {
-	data_requesting_apis: Query<'w, 's, &'static mut dyn DataRequestingAPI<R>>,
+	data_requesting_apis: Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<R>>, Entity)>,
 	dyn_system_params: Vec<DynSystemParam<'w, 's>>,
 }
 
 // SAFETY: Delegates to the tuple of its fields, only the states of the `DynSystemParam`s are built by the APIs instead of being empty.
 unsafe impl<R: ApiRequest> SystemParam for DataRequester<'_, '_, R> {
-	type State = (QueryState<&'static mut dyn DataRequestingAPI<R>>, Vec<DynSystemParamState>);
+	type State = (QueryState<(One<&'static mut dyn DataRequestingAPI<R>>, Entity)>, Vec<DynSystemParamState>);
 	type Item<'w, 's> = DataRequester<'w, 's, R>;
 	fn init_state(world: &mut World) -> Self::State {
-		let dyn_system_params: Vec<_> = world.query::<&dyn DataRequestingAPI<R>>().iter(world).flatten().map(|data_requesting_api| data_requesting_api.dyn_system_param()).collect();
+		let dyn_system_params: Vec<_> = world.query::<One<&dyn DataRequestingAPI<R>>>().iter(world).map(|data_requesting_api| data_requesting_api.dyn_system_param()).collect();
 		(Query::init_state(world), dyn_system_params.into_iter().map(|dyn_system_param| dyn_system_param.build(world)).collect())
 	}
 	fn init_access(state: &Self::State, system_meta: &mut SystemMeta, system_access: &mut SystemAccess, world: &mut World) {
@@ -116,17 +117,17 @@ unsafe impl<R: ApiRequest> SystemParam for DataRequester<'_, '_, R> {
 
 impl<'w, 's, R: ApiRequest> DataRequester<'w, 's, R> {
 	pub fn request(&mut self, request: R, requester_node: Entity) -> R::Response {
-		let best_api = best(self.data_requesting_apis.iter().flatten().enumerate().map(|(index, data_requesting_api)| (data_requesting_api.cost(&mut self.dyn_system_params, &request), index)))
+		let api_entity = best(self.data_requesting_apis.iter().map(|(data_requesting_api, entity)| (data_requesting_api.cost(&mut self.dyn_system_params, &request), entity)))
 			.expect("Data request failed to find node to fulfill the request. This should never happen!")
 			.1;
-		for (index, mut data_requesting_api) in self.data_requesting_apis.iter_mut().flatten().enumerate() {
-			if index == best_api { continue; }
+		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
+			if entity == api_entity { continue; }
 			data_requesting_api.cancel(&mut self.dyn_system_params, request.params(), requester_node);
 		}
-		self.data_requesting_apis.iter_mut().flatten().nth(best_api).expect("This must exist as it was found in best").request(&mut self.dyn_system_params, request, requester_node)
+		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(&mut self.dyn_system_params, request, requester_node)
 	}
 	pub fn cancel(&mut self, params: &R::Params, requester_node: Entity) {
-		for mut data_requesting_api in self.data_requesting_apis.iter_mut().flatten() {
+		for (mut data_requesting_api, _entity) in self.data_requesting_apis.iter_mut() {
 			data_requesting_api.cancel(&mut self.dyn_system_params, params, requester_node);
 		}
 	}
@@ -137,8 +138,8 @@ where T::Item<'static, 'static>: SystemParam<Item<'a, 'a> = T> + 'static {
 	dyn_system_params.iter_mut().find_map(|dyn_system_param| dyn_system_param.downcast_mut()).expect("Every API is given the param from its dyn_system_param")
 }
 
-pub(crate) fn best<K>(costs: impl Iterator<Item = (Option<f32>, K)>) -> Option<(f32, K)> {
-	costs.filter_map(|(cost, key)| Some((cost?, key))).min_by(|a, b| a.0.total_cmp(&b.0))
+pub(crate) fn best(costs: impl Iterator<Item = (Option<f32>, Entity)>) -> Option<(f32, Entity)> {
+	costs.filter_map(|(cost, entity)| Some((cost?, entity))).min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
 fn update_bile_state_tick(mut bile_state_tick: ResMut<StateTick>) {
