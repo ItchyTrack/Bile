@@ -63,6 +63,7 @@ impl<DT: DataType, const CACHE: bool> Default for DataColumn<DT, CACHE> {
 
 impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 	pub fn get(&self, params: &DT::Params) -> Option<&DataInfo<DT>> { self.data.get(params) }
+	fn best_node(data_producing_node: &DataProducingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> { best(data_producing_node.iter().map(|(node, entity)| (node.cost(request), entity))) }
 	pub fn request(&mut self, data_producing_node: &mut DataProducingNodes<DT>, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
 		if let Some(info) = self.data.get_mut(&request.params) {
 			if info.dirty_state.satisfies(&request.allowed_tick) {
@@ -77,7 +78,7 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
 		if already_requested { return None; }
 		// get node
-		let node_entity = best(data_producing_node.iter().map(|(node, entity)| (node.cost(&request), entity))).expect("Data request failed to find node to fulfill the request. This should never happen!").1;
+		let node_entity = Self::best_node(data_producing_node, &request).expect("Data request failed to find node to fulfill the request. This should never happen!").1;
 		let mut node = data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
 		if let Some(sources) = self.data_to_drop.get_mut(&request.params) {
 			sources.remove(&node_entity);
@@ -197,12 +198,12 @@ impl<DT: DataType> DataRequestingAPI<Request<DT>> for DataColumn<DT> {
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
 		let mut data_nodes: DataNodes<DT> = downcast(dyn_system_params);
 		let diff_cost = self.best_diff(&data_nodes.p1(), request).map(|best| best.0);
-		let node_cost = best(data_nodes.p0().iter().map(|(node, entity)| (node.cost(request), entity))).map(|best| best.0);
+		let node_cost = Self::best_node(&data_nodes.p0(), request).map(|best| best.0);
 		[diff_cost, node_cost].into_iter().flatten().reduce(f32::min)
 	}
 	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
 		let mut data_nodes: DataNodes<DT> = downcast(dyn_system_params);
-		let node_cost = best(data_nodes.p0().iter().map(|(node, entity)| (node.cost(&request), entity))).map(|best| best.0);
+		let node_cost = Self::best_node(&data_nodes.p0(), &request).map(|best| best.0);
 		if let Some((cost, node_entity)) = self.best_diff(&data_nodes.p1(), &request) && node_cost.is_none_or(|node_cost| cost < node_cost) {
 			let info = self.data.get_mut(&request.params).expect("This must exist as it was found in best_diff");
 			let (data, diffs) = (info.data.as_mut().expect("This must exist as it was found in best_diff"), info.diffs.replace(Vec::new()).expect("This must exist as it was found in best_diff"));
@@ -241,8 +242,7 @@ impl<DT: DataType, SDT: StreamingDataType<DataType = DT, Params = DT::Params>> D
 	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<(DataProducingNodes<DT>, Commands)>(ParamBuilder) }
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &streaming::Request<SDT>) -> Option<f32> {
 		let (data_producing_node, _): (DataProducingNodes<DT>, Commands) = downcast(dyn_system_params);
-		let request = Request::new(request.params.clone(), request.allowed_tick);
-		best(data_producing_node.iter().map(|(node, entity)| (node.cost(&request), entity))).map(|best| best.0)
+		Self::best_node(&data_producing_node, &Request::new(request.params.clone(), request.allowed_tick)).map(|best| best.0)
 	}
 	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: streaming::Request<SDT>, requester_node: Entity) {
 		let (mut data_producing_node, mut commands): (DataProducingNodes<DT>, Commands) = downcast(dyn_system_params);
