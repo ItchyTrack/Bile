@@ -247,3 +247,84 @@ fn dirtying_updates_the_state_tick() {
 	dirty_sum(&mut app, None);
 	assert_eq!(app.world().resource::<StateTick>().current_tick(), tick + 2);
 }
+
+#[test]
+fn finished_stream_is_released_when_its_last_user_cancels() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_streaming::<Parts, StreamProducer>().register_consumer_streaming::<Parts, Consumer>();
+	let producer = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(1.0))).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	let (_, id) = app.world().get::<StreamProducer>(producer).unwrap().0[0];
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(producer, &3, id, DirtyState::UpToDate);
+			passer.push(producer, &3, id, 10);
+			passer.finish(producer, &3, id);
+		})
+		.unwrap();
+	request_parts(&mut app, b);
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3"]);
+	assert_eq!(events(&app, b), vec!["start 3", "push 3 10", "finish 3"]);
+	// the finished stream stays for as long as it has a user
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
+	app.update();
+	assert!(app.world().get::<StreamProducer>(producer).unwrap().1.is_empty());
+	request_parts(&mut app, a);
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3", "start 3", "push 3 10", "finish 3"]);
+	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().0.len(), 1);
+	// the last cancel releases it and drops the producer
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| { requester.cancel(&3, a); requester.cancel(&3, b); }).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().1, vec![3]);
+	// so nothing is left to replay and the producer is requested again
+	request_parts(&mut app, a);
+	app.update();
+	assert_eq!(events(&app, a).len(), 6);
+	let requests = &app.world().get::<StreamProducer>(producer).unwrap().0;
+	assert_eq!(requests.len(), 2);
+	assert_ne!(requests[1].1, id);
+}
+
+#[test]
+fn finished_gather_is_released_when_its_last_user_cancels() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_gather::<Parts, GatherProducer>().register_consumer_streaming::<Parts, Consumer>();
+	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
+	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(x, &3, id, DirtyState::UpToDate);
+			passer.start(y, &3, id, DirtyState::UpToDate);
+			passer.push(x, &3, id, 10);
+			passer.push(y, &3, id, 20);
+			passer.finish(x, &3, id);
+			passer.finish(y, &3, id);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
+	assert!(app.world().get::<GatherProducer>(x).unwrap().1.is_empty());
+	assert!(app.world().get::<GatherProducer>(y).unwrap().1.is_empty());
+	// the last cancel releases the finished stream and drops every node of it
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
+	// so nothing is left to replay and every node is requested again
+	request_parts(&mut app, a);
+	app.update();
+	assert_eq!(events(&app, a).len(), 4);
+	let requests = &app.world().get::<GatherProducer>(x).unwrap().0;
+	assert_eq!(requests.len(), 2);
+	assert_ne!(requests[1].1, id);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, *requests);
+}
