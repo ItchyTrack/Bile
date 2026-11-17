@@ -34,11 +34,11 @@ type DataNodes<'w, 's, DT> = ParamSet<'w, 's, (DataProducingNodes<'static, 'stat
 // Simple Producing Data
 pub struct DataInfo<DT: DataType> {
 	pub dirty_state: DirtyState,
-	pub data: Option<DT::Data>, // None if the column does not cache
+	pub data: Option<DT::Data>,
 	pub usages: HashSet<Entity>,
-	pub source_entity: Entity, // the node that made the latest version of the data
-	chain: Vec<Entity>, // the nodes that made the versions before it. Their data is out of date and not stored.
-	diffs: Option<Vec<DT::Diff>>, // everything the data was dirtied with. None if it is not known and so can not be applied.
+	pub source_entity: Entity,
+	chain: Vec<Entity>, // earlier sources, whose out of date data is not stored
+	diffs: Option<Vec<DT::Diff>>, // every dirty since the data was made. None if one had no diff
 }
 
 // With `CACHE` false the column only keeps track of the data and the requester has to store it.
@@ -154,7 +154,7 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 					old_sources.insert(std::mem::replace(&mut info.source_entity, source_entity));
 					old_sources.remove(&source_entity);
 				}
-				// A source with a chain applied diffs. What was dirtied after it got them is not in its data.
+				// The data of a diff applier lacks what was dirtied after it got its diffs.
 				if info.chain.is_empty() || info.diffs.as_ref().is_some_and(Vec::is_empty) {
 					info.dirty_state = dirty_state;
 					info.diffs = diffs;
@@ -185,7 +185,6 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 }
 
 impl<DT: DataType> DataColumn<DT> {
-	// The cheapest node that can bring the stored data up to date with the diffs it was dirtied with
 	fn best_diff(&self, diff_applying_node: &DiffApplyingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
 		let info = self.data.get(&request.params).filter(|info| info.data.is_some() && !info.dirty_state.satisfies(&request.allowed_tick))?;
 		let diffs = info.diffs.as_ref().filter(|diffs| !diffs.is_empty())?;
@@ -213,7 +212,7 @@ impl<DT: DataType> DataRequestingAPI<Request<DT>> for DataColumn<DT> {
 				info.chain.push(std::mem::replace(&mut info.source_entity, node_entity));
 			}
 			if !applied {
-				info.data = None; // The node passes the new data later and the old data is not worth caching
+				info.data = None; // out of date and not worth caching
 				self.waiting.entry(request.params).or_default().insert(requester_node, request.allowed_tick);
 				return None;
 			}
@@ -223,7 +222,7 @@ impl<DT: DataType> DataRequestingAPI<Request<DT>> for DataColumn<DT> {
 	fn cancel(&mut self, _dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity) { self.cancel(params, requester_node); }
 }
 
-// Simple Producing Data for Streaming: a stream of the one data that has the params of the stream
+// A stream from simple producers is the one data that has the params of the stream.
 
 enum Streamed<DT: DataType> {
 	Pass(DT::Params, u64, DT::Data),

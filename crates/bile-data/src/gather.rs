@@ -3,8 +3,7 @@ use bevy_trait_query::RegisterExt;
 
 use crate::{default::StreamingDataType, streaming};
 
-// A node only streams the data that is its own resposibility. The storage requests all the nodes and gathers
-// their streams into the one stream that the streaming API asked for.
+// Every node streams only its own resposibility. The storage requests them all and gathers that into one stream.
 // (Only the gather step. This does not manage ownership transfer)
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<SDT: StreamingDataType>: streaming::DataProducingNode<SDT> {}

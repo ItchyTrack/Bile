@@ -222,7 +222,7 @@ fn diffs_are_applied_instead_of_producing_again() {
 	app.update();
 	assert_eq!(app.world().get::<SumProducer>(producer).unwrap().0, vec![3]);
 	assert!(app.world().get::<SumProducer>(producer).unwrap().1.is_empty());
-	// a dirty without a diff ends the run and the producer has to make the data again
+	// a dirty without a diff ends the run
 	dirty_sum(&mut app, Some(1));
 	dirty_sum(&mut app, None);
 	dirty_sum(&mut app, Some(1));

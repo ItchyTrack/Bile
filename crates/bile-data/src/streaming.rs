@@ -15,7 +15,8 @@ pub struct StreamId(u64);
 // the params. But with streaming one could image that the smaller pieces of that data does not
 // match any params and instead is only a smaller piece of the params. This is a issue that does
 // not need to be fixed now but its something to think about.
-// Note: This is what StreamingDataType is for. Its params key a set of its DataType. This allows
+// Note: I think I solved this. I think there should be a new trait StreamingDataType Type which
+// holds a DataType and Params. This params is used to Key a set of that data type. This allows
 // something like a streaming API to not be queryable by a non streaming API, but allows the cached
 // data to be used by a non streaming API. The cache is likly to look like
 // StreamingDataType::Param -> {DataType::Param} and DataType::Param -> DataType::Data
@@ -34,8 +35,6 @@ impl<SDT: StreamingDataType> ApiRequest for Request<SDT> {
 	fn params(&self) -> &SDT::Params { &self.params }
 }
 
-// Streaming Consuming
-
 #[bevy_trait_query::queryable]
 pub trait DataConsumingNode<SDT: StreamingDataType> {
 	fn start_data(&mut self, params: &SDT::Params, tick: u64);
@@ -46,8 +45,6 @@ pub trait DataConsumingNode<SDT: StreamingDataType> {
 
 pub type DataRequester<'w, 's, SDT> = default::DataRequester<'w, 's, Request<SDT>>;
 
-// Streaming Producing
-
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<SDT: StreamingDataType> {
 	fn cost(&self, request: &Request<SDT>) -> Option<f32>; // None if the node can not fulfill the request
@@ -55,7 +52,7 @@ pub trait DataProducingNode<SDT: StreamingDataType> {
 	fn drop(&mut self, params: &SDT::Params);
 }
 
-// The nodes a column requests from. A gather is requested from all of them, anything else from the best one.
+// A gather is requested from all of its nodes, anything else from the best one.
 pub trait Producers<SDT: StreamingDataType>: DataProducingNode<SDT> + TraitQuery {
 	const GATHER: bool;
 }
@@ -66,8 +63,6 @@ impl<SDT: StreamingDataType> Producers<SDT> for dyn DataProducingNode<SDT> {
 
 type DataProducingNodes<'w, 's, P> = Query<'w, 's, (One<&'static mut P>, Entity)>;
 
-// Streaming Producing Data
-
 /// Tracks whichever stream is currently accepted for a given `params`. Kept
 /// around even after `finish` (with `live = false`) purely so a later, staler
 /// stream has something fresher to be compared against and rejected by.
@@ -76,7 +71,7 @@ struct StreamState {
 	sources: HashSet<Entity>,
 	dirty_state: DirtyState,
 	usages: HashSet<Entity>,
-	live: HashSet<Entity>, // the sources that have not finished
+	live: HashSet<Entity>,
 }
 
 enum StreamEvent<SDT: StreamingDataType> {
@@ -88,7 +83,7 @@ enum StreamEvent<SDT: StreamingDataType> {
 #[derive(Resource)]
 pub struct DataColumn<SDT: StreamingDataType, P: ?Sized + Producers<SDT> = dyn DataProducingNode<SDT>> {
 	next_stream_id: u64,
-	requested: HashMap<SDT::Params, HashSet<Entity>>, // the nodes that the newest stream of a gather was requested from
+	requested: HashMap<SDT::Params, HashSet<Entity>>, // by the newest request, only read for a gather
 	streams: HashMap<SDT::Params, StreamState>,
 	data_to_drop: HashMap<SDT::Params, HashSet<Entity>>,
 	waiting: HashMap<SDT::Params, HashMap<Entity, DirtyState>>,
@@ -124,7 +119,6 @@ impl<SDT: StreamingDataType, P: ?Sized + Producers<SDT>> DataRequestingAPI<Reque
 		// update requester
 		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
 		if already_requested { return; }
-		// get nodes
 		let mut data_producing_node: DataProducingNodes<P> = downcast(dyn_system_params);
 		let costs = data_producing_node.iter().map(|(node, entity)| (node.cost(&request), entity));
 		let sources: HashSet<Entity> = if P::GATHER { costs.filter_map(|(cost, entity)| cost.and(Some(entity))).collect() } else { best(costs).into_iter().map(|best| best.1).collect() };
