@@ -33,6 +33,10 @@ pub struct DataRequester<'w, 's, DT: DataType> {
 	dyn_system_params: Vec<DynSystemParam<'w, 's>>,
 }
 
+// TODO: Seems like it would be useful to do this SystemParam once, maybe in a new file, and then use it in simple and streaming.
+// It should not think about DataType or any of that. Just the code to help make DynSystemParam work. Either a macro or struct.
+// Maybe it should a system param that DataRequester also holds so DataRequester can use the SystemParam proc macro.
+
 // SAFETY: Delegates to the tuple of its fields, only the states of the `DynSystemParam`s are built by the APIs instead of being empty.
 unsafe impl<DT: DataType> SystemParam for DataRequester<'_, '_, DT> {
 	type State = (QueryState<(One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>, Vec<DynSystemParamState>);
