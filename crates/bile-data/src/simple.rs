@@ -1,16 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{
-	ecs::{
-		change_detection::Tick,
-		system::{DynParamBuilder, DynSystemParam, DynSystemParamState, ParamBuilder, SystemAccess, SystemMeta, SystemParam, SystemParamValidationError},
-		world::{DeferredWorld, unsafe_world_cell::UnsafeWorldCell},
-	},
+	ecs::system::{DynParamBuilder, DynSystemParam, ParamBuilder, SystemParam},
 	prelude::*,
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick};
+use crate::default::{self, BileDataSchedule, BileDataSystemSet, DataRequestingAPI, DataType, DirtyState, Request, StateTick, best, downcast};
 
 // Simple Consuming
 
@@ -20,65 +16,7 @@ pub trait DataConsumingNode<DT: DataType> {
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>); // will be passed the diff later
 }
 
-#[bevy_trait_query::queryable]
-pub trait DataRequestingAPI<DT: DataType> {
-	fn dyn_system_param(&self) -> DynParamBuilder<'static>;
-	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32>;
-	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity) -> Option<DT::Data>;
-	fn cancel(&mut self, dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity);
-}
-
-pub struct DataRequester<'w, 's, DT: DataType> {
-	data_requesting_apis: Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>,
-	dyn_system_params: Vec<DynSystemParam<'w, 's>>,
-}
-
-// SAFETY: Delegates to the tuple of its fields, only the states of the `DynSystemParam`s are built by the APIs instead of being empty.
-unsafe impl<DT: DataType> SystemParam for DataRequester<'_, '_, DT> {
-	type State = (QueryState<(One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>, Vec<DynSystemParamState>);
-	type Item<'w, 's> = DataRequester<'w, 's, DT>;
-	fn init_state(world: &mut World) -> Self::State {
-		let dyn_system_params: Vec<_> = world.query::<One<&dyn DataRequestingAPI<DT>>>().iter(world).map(|data_requesting_api| data_requesting_api.dyn_system_param()).collect();
-		(Query::init_state(world), dyn_system_params.into_iter().map(|dyn_system_param| dyn_system_param.build(world)).collect())
-	}
-	fn init_access(state: &Self::State, system_meta: &mut SystemMeta, system_access: &mut SystemAccess, world: &mut World) {
-		<(Query<_>, Vec<DynSystemParam>)>::init_access(state, system_meta, system_access, world);
-	}
-	fn apply(state: &mut Self::State, system_meta: &SystemMeta, world: &mut World) { <(Query<_>, Vec<DynSystemParam>)>::apply(state, system_meta, world); }
-	fn queue(state: &mut Self::State, system_meta: &SystemMeta, world: DeferredWorld) { <(Query<_>, Vec<DynSystemParam>)>::queue(state, system_meta, world); }
-	unsafe fn get_param<'w, 's>(state: &'s mut Self::State, system_meta: &SystemMeta, world: UnsafeWorldCell<'w>, change_tick: Tick) -> Result<Self::Item<'w, 's>, SystemParamValidationError> {
-		let (data_requesting_apis, dyn_system_params) = unsafe { <(Query<_>, Vec<DynSystemParam>)>::get_param(state, system_meta, world, change_tick) }?;
-		Ok(DataRequester { data_requesting_apis, dyn_system_params })
-	}
-}
-
-impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
-	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		let api_entity = best(self.data_requesting_apis.iter().map(|(data_requesting_api, entity)| (data_requesting_api.cost(&mut self.dyn_system_params, &request), entity))).1;
-		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
-			if entity == api_entity { continue; }
-			data_requesting_api.cancel(&mut self.dyn_system_params, &request.params, requester_node);
-		}
-		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(&mut self.dyn_system_params, request, requester_node)
-	}
-	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
-		for (mut data_requesting_api, _entity) in self.data_requesting_apis.iter_mut() {
-			data_requesting_api.cancel(&mut self.dyn_system_params, params, requester_node);
-		}
-	}
-}
-
-pub fn downcast<'a, T: SystemParam>(dyn_system_params: &'a mut [DynSystemParam]) -> T
-where T::Item<'static, 'static>: SystemParam<Item<'a, 'a> = T> + 'static {
-	dyn_system_params.iter_mut().find_map(|dyn_system_param| dyn_system_param.downcast_mut()).expect("Every API is given the param from its dyn_system_param")
-}
-
-fn best(costs: impl Iterator<Item = (Option<f32>, Entity)>) -> (f32, Entity) {
-	costs
-		.filter_map(|(cost, entity)| Some((cost?, entity)))
-		.min_by(|a, b| a.0.total_cmp(&b.0))
-		.expect("Data request failed to find node to fulfill the request. This should never happen!")
-}
+pub type DataRequester<'w, 's, DT> = default::DataRequester<'w, 's, Request<DT>>;
 
 // Simple Producing
 
@@ -135,7 +73,7 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
 		if already_requested { return None; }
 		// get node
-		let node_entity = best(data_producing_node.iter().map(|(node, entity)| (node.cost(&request), entity))).1;
+		let node_entity = best(data_producing_node.iter().map(|(node, entity)| (node.cost(&request), entity))).expect("Data request failed to find node to fulfill the request. This should never happen!").1;
 		let mut node = data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
 		if let Some(sources) = self.data_to_drop.get_mut(&request.params) {
 			sources.remove(&node_entity);
@@ -230,11 +168,11 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 	}
 }
 
-impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
+impl<DT: DataType> DataRequestingAPI<Request<DT>> for DataColumn<DT> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<DataProducingNodes<DT>>(ParamBuilder) }
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
 		let data_producing_node: DataProducingNodes<DT> = downcast(dyn_system_params);
-		Some(best(data_producing_node.iter().map(|(node, entity)| (node.cost(request), entity))).0)
+		best(data_producing_node.iter().map(|(node, entity)| (node.cost(request), entity))).map(|best| best.0)
 	}
 	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
 		self.request(&mut downcast(dyn_system_params), request, requester_node)
@@ -319,7 +257,7 @@ fn setup_bevy_resources<DT: DataType>(app: &mut App) {
 		))
 		.init_resource::<DataColumn<DT>>()
 		.init_resource::<DataColumn<DT, false>>()
-		.register_component_as::<dyn DataRequestingAPI<DT>, DataColumn<DT>>();
+		.register_component_as::<dyn DataRequestingAPI<Request<DT>>, DataColumn<DT>>();
 }
 
 pub trait BileRegisterSimple {
