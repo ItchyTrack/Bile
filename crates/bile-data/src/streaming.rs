@@ -141,11 +141,15 @@ impl<SDT: StreamingDataType, P: ?Sized + Producers<SDT>> DataRequestingAPI<Reque
 			}
 		}
 
-		let Some(stream) = self.streams.get_mut(params) else { return; };
+		let Some(stream) = self.streams.get_mut(params) else {
+			if !self.waiting.contains_key(params) { self.requested.remove(params); }
+			return;
+		};
 		stream.usages.remove(&requester_node);
 		if !stream.live.is_empty() && stream.usages.is_empty() && !self.waiting.contains_key(params) {
 			self.data_to_drop.entry(params.clone()).or_default().extend(std::mem::take(&mut stream.sources));
 			self.streams.remove(params);
+			self.requested.remove(params);
 		}
 	}
 }
