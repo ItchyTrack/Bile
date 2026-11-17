@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{default::{self, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, StateTick}, dyn_system_params::{DynSystemParams, HasDynSystemParam, downcast}, simple};
+use crate::{default::{BileDataSchedule, BileDataSystemSet, DirtyState, StateTick}, dyn_system_params::{DynSystemParams, HasDynSystemParam, downcast}};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
@@ -19,22 +19,10 @@ impl StreamId {
 	}
 }
 
-// The one weird thing is that the DataType kinda assumes that the data always has a mapping from
-// the params. But with streaming one could image that the smaller pieces of that data does not
-// match any params and instead is only a smaller piece of the params. This is a issue that does
-// not need to be fixed now but its something to think about.
-// Note: I think I solved this. I think there should be a new trait StreamingDataType Type which
-// holds a DataType and Params. This params is used to Key a set of that data type. This allows
-// something like a streaming API to not be queryable by a non streaming API, but allows the cached
-// data to be used by a non streaming API. The cache is likly to look like
-// StreamingDataType::Param -> {DataType::Param} and DataType::Param -> DataType::Data
-// This will also allow nodes that just know which DataType Params to requst for a StreamingDataType
-// Params which then requests the regulare DataType Params and passes them back like a streaming
-// node would. I think that gather is very similar and gather will also use this new data type
-
 pub trait StreamingDataType: 'static {
-	type DataType: DataType;
 	type Params: Clone + Hash + PartialEq + Eq + Send + Sync + 'static;
+	type Data: Clone + Send + Sync + 'static;
+	type Diff: Clone + Send + Sync + 'static;
 }
 
 pub struct Request<SDT: StreamingDataType> {
@@ -45,9 +33,9 @@ pub struct Request<SDT: StreamingDataType> {
 #[bevy_trait_query::queryable]
 pub trait DataConsumingNode<SDT: StreamingDataType> {
 	fn start_data(&mut self, params: &SDT::Params, tick: u64);
-	fn push_data(&mut self, params: &SDT::Params, data_params: &<SDT::DataType as DataType>::Params, data: <SDT::DataType as DataType>::Data);
+	fn push_data(&mut self, params: &SDT::Params, data: SDT::Data);
 	fn finish_data(&mut self, params: &SDT::Params);
-	fn dirty_data(&mut self, params: &SDT::Params, last_clean_tick: u64, diff: Option<&<SDT::DataType as DataType>::Diff>);
+	fn dirty_data(&mut self, params: &SDT::Params, last_clean_tick: u64, diff: Option<&SDT::Diff>);
 }
 
 #[bevy_trait_query::queryable]
@@ -125,9 +113,9 @@ fn best_node<SDT: StreamingDataType>(data_producing_node: &DataProducingNodes<SD
 #[bevy_trait_query::queryable]
 pub trait DataStorage<SDT: StreamingDataType> {
 	fn start(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId, dirty_state: DirtyState);
-	fn push(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId, data_params: &<SDT::DataType as DataType>::Params, data: &<SDT::DataType as DataType>::Data);
+	fn push(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId, data: &SDT::Data);
 	fn finish(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId);
-	fn dirty_data(&mut self, data_consuming_nodes: &mut DataConsumingNodes<SDT>, params: &SDT::Params, last_clean_tick: u64, diff: Option<&<SDT::DataType as DataType>::Diff>);
+	fn dirty_data(&mut self, data_consuming_nodes: &mut DataConsumingNodes<SDT>, params: &SDT::Params, last_clean_tick: u64, diff: Option<&SDT::Diff>);
 	fn uses(&self, params: &SDT::Params, source_entity: Entity) -> bool; // a node is only dropped when no storage uses it
 	fn drop_data(&mut self) -> HashMap<SDT::Params, HashSet<Entity>>; // the nodes this storage no longer uses
 }
@@ -135,24 +123,25 @@ pub trait DataStorage<SDT: StreamingDataType> {
 /// Tracks whichever stream is currently accepted for a given `params`. Kept
 /// around even after `finish` (with `live = false`) purely so a later, staler
 /// stream has something fresher to be compared against and rejected by.
-struct StreamState {
+struct StreamState<SDT: StreamingDataType> {
 	stream_id: StreamId,
 	source_entity: Entity,
 	dirty_state: DirtyState,
 	usages: HashSet<Entity>,
+	data: Vec<SDT::Data>,
 	live: bool,
 }
 
 enum StreamEvent<SDT: StreamingDataType> {
 	Start { entities: HashSet<Entity> },
-	Push { entities: HashSet<Entity>, data_params: <SDT::DataType as DataType>::Params, data: <SDT::DataType as DataType>::Data },
+	Push { entities: HashSet<Entity>, data: SDT::Data },
 	Finish { entities: HashSet<Entity> },
 }
 
 #[derive(Resource)]
 pub struct DataColumn<SDT: StreamingDataType> {
 	requested: HashMap<SDT::Params, StreamId>, // the stream this storage waits for a node to start
-	streams: HashMap<SDT::Params, StreamState>,
+	streams: HashMap<SDT::Params, StreamState<SDT>>,
 	data_to_drop: HashMap<SDT::Params, HashSet<Entity>>,
 	waiting: HashMap<SDT::Params, HashMap<Entity, DirtyState>>,
 	// Ordered (unlike the other modules' HashMap-based `finished`) because
@@ -178,6 +167,16 @@ impl<SDT: StreamingDataType> DataRequestingAPI<SDT> for DataColumn<SDT> {
 		best_node(&downcast(dyn_system_params), request).map(|best| best.0)
 	}
 	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<SDT>, requester_node: Entity) {
+		if let Some(stream) = self.streams.get_mut(&request.params) && stream.dirty_state.satisfies(&request.allowed_tick) {
+			stream.usages.insert(requester_node);
+			let entities = HashSet::from([requester_node]);
+			self.events.push((request.params.clone(), StreamEvent::Start { entities: entities.clone() }));
+			self.events.extend(stream.data.iter().map(|data| (request.params.clone(), StreamEvent::Push { entities: entities.clone(), data: data.clone() })));
+			if !stream.live {
+				self.events.push((request.params, StreamEvent::Finish { entities }));
+			}
+			return;
+		}
 		let already_requested = self.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|required| required.satisfies(&request.allowed_tick)));
 		// update requester
 		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
@@ -220,7 +219,7 @@ pub struct DataDirtier<'w, 's, SDT: StreamingDataType> {
 }
 
 impl<'w, 's, SDT: StreamingDataType> DataDirtier<'w, 's, SDT> {
-	pub fn mark_dirty(&mut self, params: &SDT::Params, diff: Option<&<SDT::DataType as DataType>::Diff>) {
+	pub fn mark_dirty(&mut self, params: &SDT::Params, diff: Option<&SDT::Diff>) {
 		for mut data_storage in &mut self.data_storages {
 			data_storage.dirty_data(&mut self.data_consuming_nodes, params, self.bile_state_tick.current_tick() - 1, diff);
 		}
@@ -241,9 +240,9 @@ impl<'w, 's, SDT: StreamingDataType> DataPasser<'w, 's, SDT> {
 	}
 
 	/// Producer calls this any number of times between `start` and `finish`.
-	pub fn push(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId, data_params: <SDT::DataType as DataType>::Params, data: <SDT::DataType as DataType>::Data) {
+	pub fn push(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId, data: SDT::Data) {
 		for mut data_storage in &mut self.data_storages {
-			data_storage.push(source_entity, params, stream_id, &data_params, &data);
+			data_storage.push(source_entity, params, stream_id, &data);
 		}
 	}
 
@@ -293,14 +292,15 @@ impl<SDT: StreamingDataType> DataStorage<SDT> for DataColumn<SDT> {
 			self.events.push((params.clone(), StreamEvent::Start { entities: usages.clone() }));
 		}
 
-		self.streams.insert(params.clone(), StreamState { stream_id, source_entity, dirty_state, usages, live: true });
+		self.streams.insert(params.clone(), StreamState { stream_id, source_entity, dirty_state, usages, data: Vec::new(), live: true });
 	}
-	fn push(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId, data_params: &<SDT::DataType as DataType>::Params, data: &<SDT::DataType as DataType>::Data) {
-		let Some(stream) = self.streams.get(params) else { return; };
+	fn push(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId, data: &SDT::Data) {
+		let Some(stream) = self.streams.get_mut(params) else { return; };
 		if stream.stream_id != stream_id || !stream.live || stream.source_entity != source_entity { return; } // stale stream, ignore
+		stream.data.push(data.clone());
 		if stream.usages.is_empty() { return; }
 		let usages = stream.usages.clone();
-		self.events.push((params.clone(), StreamEvent::Push { entities: usages, data_params: data_params.clone(), data: data.clone() }));
+		self.events.push((params.clone(), StreamEvent::Push { entities: usages, data: data.clone() }));
 	}
 	fn finish(&mut self, source_entity: Entity, params: &SDT::Params, stream_id: StreamId) {
 		let Some(stream) = self.streams.get_mut(params) else { return; };
@@ -311,7 +311,7 @@ impl<SDT: StreamingDataType> DataStorage<SDT> for DataColumn<SDT> {
 			self.events.push((params.clone(), StreamEvent::Finish { entities }));
 		}
 	}
-	fn dirty_data(&mut self, data_consuming_nodes: &mut DataConsumingNodes<SDT>, params: &SDT::Params, last_clean_tick: u64, diff: Option<&<SDT::DataType as DataType>::Diff>) {
+	fn dirty_data(&mut self, data_consuming_nodes: &mut DataConsumingNodes<SDT>, params: &SDT::Params, last_clean_tick: u64, diff: Option<&SDT::Diff>) {
 		let Some(stream) = self.streams.get_mut(params) else { return; };
 		stream.dirty_state = DirtyState::Dirty { tick: last_clean_tick };
 		stream.usages.retain(|&usage| {
@@ -348,10 +348,10 @@ pub fn pass_data<SDT: StreamingDataType>(
 					node.start_data(&params, tick);
 				}
 			}
-			StreamEvent::Push { entities, data_params, data } => {
+			StreamEvent::Push { entities, data } => {
 				for entity in entities {
 					let Ok(mut node) = data_consuming_nodes.get_mut(entity) else { continue; };
-					node.push_data(&params, &data_params, data.clone());
+					node.push_data(&params, data.clone());
 				}
 			}
 			StreamEvent::Finish { entities } => {
@@ -395,126 +395,9 @@ fn setup_bevy_resources<SDT: StreamingDataType>(app: &mut App) {
 		.register_component_as::<dyn DataStorage<SDT>, DataColumn<SDT>>();
 }
 
-// The API for simple: the stream of a params is the set of DataType data that a node knows the params of.
-// StreamingDataType::Param -> {DataType::Param} is cached here and DataType::Param -> DataType::Data by simple.
-
-#[bevy_trait_query::queryable]
-pub trait DataParamsNode<SDT: StreamingDataType> {
-	fn cost(&self, request: &Request<SDT>) -> Option<f32>; // None if the node does not know the params of the request
-	fn params(&self, params: &SDT::Params) -> HashSet<<SDT::DataType as DataType>::Params>;
-}
-
-type SimpleParams<'w, 's, SDT> = (simple::DataRequester<'w, 's, <SDT as StreamingDataType>::DataType>, Query<'w, 's, One<&'static dyn DataParamsNode<SDT>>>, Single<'w, 's, Entity, With<SimpleDataColumn<SDT>>>);
-
-struct SimpleStream<SDT: StreamingDataType> {
-	data_params: HashSet<<SDT::DataType as DataType>::Params>,
-	waiting: HashMap<Entity, HashSet<<SDT::DataType as DataType>::Params>>, // what each requester has not been pushed yet
-}
-
-enum SimpleEvent<SDT: StreamingDataType> {
-	Start,
-	Push(<SDT::DataType as DataType>::Params, <SDT::DataType as DataType>::Data),
-	Finish,
-	Dirty(u64, Option<<SDT::DataType as DataType>::Diff>),
-}
-
-#[derive(Resource)]
-pub struct SimpleDataColumn<SDT: StreamingDataType> {
-	streams: HashMap<SDT::Params, SimpleStream<SDT>>,
-	events: Vec<(Entity, SDT::Params, SimpleEvent<SDT>)>,
-}
-
-impl<SDT: StreamingDataType> Default for SimpleDataColumn<SDT> {
-	fn default() -> Self {
-		Self {
-			streams: HashMap::default(),
-			events: Vec::default(),
-		}
-	}
-}
-
-impl<SDT: StreamingDataType> DataRequestingAPI<SDT> for SimpleDataColumn<SDT> {
-	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<SimpleParams<SDT>>(ParamBuilder) }
-	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<SDT>) -> Option<f32> {
-		let (_, data_params_nodes, _): SimpleParams<SDT> = downcast(dyn_system_params);
-		data_params_nodes.iter().filter_map(|node| node.cost(request)).reduce(f32::min)
-	}
-	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<SDT>, requester_node: Entity) {
-		let (mut data_requester, data_params_nodes, entity): SimpleParams<SDT> = downcast(dyn_system_params);
-		let stream = self.streams.entry(request.params.clone()).or_insert_with(|| {
-			let node = data_params_nodes.iter().filter_map(|node| Some((node.cost(&request)?, node))).min_by(|a, b| a.0.total_cmp(&b.0));
-			SimpleStream { data_params: node.expect("Data request failed to find node to fulfill the request. This should never happen!").1.params(&request.params), waiting: HashMap::default() }
-		});
-		self.events.push((requester_node, request.params.clone(), SimpleEvent::Start));
-		let mut waiting = HashSet::default();
-		for data_params in &stream.data_params {
-			match data_requester.request(default::Request::new(data_params.clone(), request.allowed_tick), *entity) {
-				Some(data) => self.events.push((requester_node, request.params.clone(), SimpleEvent::Push(data_params.clone(), data))),
-				None => { waiting.insert(data_params.clone()); }
-			}
-		}
-		if waiting.is_empty() {
-			self.events.push((requester_node, request.params, SimpleEvent::Finish));
-		}
-		stream.waiting.insert(requester_node, waiting);
-	}
-	fn cancel(&mut self, dyn_system_params: &mut [DynSystemParam], params: &SDT::Params, requester_node: Entity) {
-		let (mut data_requester, _, entity): SimpleParams<SDT> = downcast(dyn_system_params);
-		self.events.retain(|(event_entity, event_params, _)| *event_entity != requester_node || event_params != params);
-		let Some(stream) = self.streams.get_mut(params) else { return; };
-		stream.waiting.remove(&requester_node);
-		if !stream.waiting.is_empty() { return; }
-		let stream = self.streams.remove(params).expect("It was just found");
-		for data_params in stream.data_params {
-			if self.streams.values().any(|stream| stream.data_params.contains(&data_params)) { continue; }
-			data_requester.cancel(&data_params, *entity);
-		}
-	}
-}
-
-impl<SDT: StreamingDataType> simple::DataConsumingNode<SDT::DataType> for SimpleDataColumn<SDT> {
-	fn pass_data(&mut self, data_params: &<SDT::DataType as DataType>::Params, _tick: u64, data: <SDT::DataType as DataType>::Data) {
-		for (params, stream) in &mut self.streams {
-			for (&entity, waiting) in &mut stream.waiting {
-				if !waiting.remove(data_params) { continue; }
-				self.events.push((entity, params.clone(), SimpleEvent::Push(data_params.clone(), data.clone())));
-				if waiting.is_empty() {
-					self.events.push((entity, params.clone(), SimpleEvent::Finish));
-				}
-			}
-		}
-	}
-	fn dirty_data(&mut self, data_params: &<SDT::DataType as DataType>::Params, last_clean_tick: u64, diff: Option<&<SDT::DataType as DataType>::Diff>) {
-		for (params, stream) in &self.streams {
-			if !stream.data_params.contains(data_params) { continue; }
-			for &entity in stream.waiting.keys() {
-				self.events.push((entity, params.clone(), SimpleEvent::Dirty(last_clean_tick, diff.cloned())));
-			}
-		}
-	}
-}
-
-pub fn pass_simple_data<SDT: StreamingDataType>(
-	bile_state_tick: Res<StateTick>,
-	mut data_column: ResMut<SimpleDataColumn<SDT>>,
-	mut data_consuming_nodes: Query<One<&'static mut dyn DataConsumingNode<SDT>>>,
-) {
-	for (entity, params, event) in data_column.events.drain(..) {
-		let Ok(mut node) = data_consuming_nodes.get_mut(entity) else { continue; };
-		match event {
-			SimpleEvent::Start => node.start_data(&params, bile_state_tick.current_tick()),
-			SimpleEvent::Push(data_params, data) => node.push_data(&params, &data_params, data),
-			SimpleEvent::Finish => node.finish_data(&params),
-			SimpleEvent::Dirty(last_clean_tick, diff) => node.dirty_data(&params, last_clean_tick, diff.as_ref()),
-		}
-	}
-}
-
 pub trait BileRegisterStreaming {
 	fn register_producer_streaming<SDT, C>(&mut self) -> &mut Self
 	where SDT: StreamingDataType, C: Component + DataProducingNode<SDT>;
-	fn register_params_streaming<SDT, C>(&mut self) -> &mut Self
-	where SDT: StreamingDataType, C: Component + DataParamsNode<SDT>;
 	fn register_consumer_streaming<SDT, C>(&mut self) -> &mut Self
 	where SDT: StreamingDataType, C: Component + DataConsumingNode<SDT>;
 }
@@ -534,16 +417,5 @@ impl BileRegisterStreaming for App {
 		self.register_component_as::<dyn DataConsumingNode<SDT>, C>();
 		setup_bevy_resources::<SDT>(self);
 		self
-	}
-
-	fn register_params_streaming<SDT, C>(&mut self) -> &mut Self
-	where SDT: StreamingDataType, C: Component + DataParamsNode<SDT>,
-	{
-		self.register_component_as::<dyn DataParamsNode<SDT>, C>();
-		if self.world().contains_resource::<SimpleDataColumn<SDT>>() { return self; }
-		self.add_systems(BileDataSchedule, pass_simple_data::<SDT>.in_set(BileDataSystemSet::PassData).after(simple::pass_data::<SDT::DataType>))
-			.init_resource::<SimpleDataColumn<SDT>>()
-			.register_component_as::<dyn DataRequestingAPI<SDT>, SimpleDataColumn<SDT>>()
-			.register_component_as::<dyn simple::DataConsumingNode<SDT::DataType>, SimpleDataColumn<SDT>>()
 	}
 }
