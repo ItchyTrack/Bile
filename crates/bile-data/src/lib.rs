@@ -22,3 +22,5 @@ impl Plugin for BileDataPlugin {
 		app.add_plugins(BileDataDefaultPlugin);
 	}
 }
+#[cfg(test)]
+mod tests;

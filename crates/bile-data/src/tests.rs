@@ -1,0 +1,261 @@
+use bevy::ecs::system::RunSystemOnce;
+
+use crate::{simple::{self, BileRegisterSimple}, streaming::{self, BileRegisterStreaming}, *};
+
+struct Num;
+impl DataType for Num {
+	type Params = u32;
+	type Data = u32;
+	type Diff = ();
+}
+struct Nums;
+impl StreamingDataType for Nums {
+	type DataType = Num;
+	type Params = u32;
+}
+
+#[derive(Component, Default)]
+struct Producer(Vec<u32>, Vec<u32>);
+impl simple::DataProducingNode<Num> for Producer {
+	fn cost(&self, _request: &Request<Num>) -> Option<f32> { Some(1.0) }
+	fn request(&mut self, request: Request<Num>) { self.0.push(request.params); }
+	fn drop(&mut self, params: &u32) { self.1.push(*params); }
+}
+
+#[derive(Component, Default)]
+struct Consumer(Vec<String>);
+impl streaming::DataConsumingNode<Nums> for Consumer {
+	fn start_data(&mut self, params: &u32, _tick: u64) { self.0.push(format!("start {params}")); }
+	fn push_data(&mut self, params: &u32, data_params: &u32, data: u32) { self.0.push(format!("push {params} {data_params} {data}")); }
+	fn finish_data(&mut self, params: &u32) { self.0.push(format!("finish {params}")); }
+	fn dirty_data(&mut self, params: &u32, _tick: u64, _diff: Option<&()>) { self.0.push(format!("dirty {params}")); }
+}
+
+fn request(app: &mut App, entity: Entity) {
+	app.world_mut()
+		.run_system_once(move |mut requester: streaming::DataRequester<Nums>| requester.request(streaming::Request { params: 3, allowed_tick: DirtyState::UpToDate }, entity))
+		.unwrap();
+}
+
+#[test]
+fn simple_producers_fulfil_streams() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_simple::<Num, Producer>().register_consumer_streaming::<Nums, Consumer>().register_streaming_simple::<Nums>();
+	let producer = app.world_mut().spawn(Producer::default()).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a);
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().0, vec![3]);
+	app.world_mut().run_system_once(move |mut passer: simple::DataPasser<Num>| passer.pass_data(producer, &3, DirtyState::UpToDate, 30)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 3 30", "finish 3"]);
+	request(&mut app, b);
+	app.update();
+	assert_eq!(app.world().get::<Consumer>(b).unwrap().0, vec!["start 3", "push 3 3 30", "finish 3"]);
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().0, vec![3]);
+	app.world_mut().run_system_once(|mut dirtier: simple::DataDirtier<Num>| dirtier.mark_dirty(&3, None)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<Consumer>(a).unwrap().0.last().unwrap(), "dirty 3");
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Nums>| { requester.cancel(&3, a); requester.cancel(&3, b); }).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().1, vec![3]);
+}
+
+struct Parts;
+impl StreamingDataType for Parts {
+	type DataType = Num;
+	type Params = u32;
+}
+
+impl streaming::DataConsumingNode<Parts> for Consumer {
+	fn start_data(&mut self, params: &u32, _tick: u64) { self.0.push(format!("start {params}")); }
+	fn push_data(&mut self, params: &u32, data_params: &u32, data: u32) { self.0.push(format!("push {params} {data_params} {data}")); }
+	fn finish_data(&mut self, params: &u32) { self.0.push(format!("finish {params}")); }
+	fn dirty_data(&mut self, params: &u32, _tick: u64, _diff: Option<&()>) { self.0.push(format!("dirty {params}")); }
+}
+
+#[derive(Component, Default)]
+struct StreamProducer(Vec<(u32, streaming::StreamId)>, Vec<u32>, Option<f32>);
+impl streaming::DataProducingNode<Parts> for StreamProducer {
+	fn cost(&self, _request: &streaming::Request<Parts>) -> Option<f32> { self.2 }
+	fn request(&mut self, request: streaming::Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
+	fn drop(&mut self, params: &u32) { self.1.push(*params); }
+}
+impl gather::DataProducingNode<Parts> for StreamProducer {}
+
+fn request_parts(app: &mut App, entity: Entity) {
+	app.world_mut()
+		.run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.request(streaming::Request { params: 3, allowed_tick: DirtyState::UpToDate }, entity))
+		.unwrap();
+}
+
+#[test]
+fn streaming_producer_streams() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_streaming::<Parts, StreamProducer>().register_consumer_streaming::<Parts, Consumer>();
+	let producer = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(1.0))).id();
+	app.world_mut().spawn(StreamProducer(vec![], vec![], Some(2.0)));
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	let (params, id) = app.world().get::<StreamProducer>(producer).unwrap().0[0];
+	assert_eq!(params, 3);
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(producer, &3, id, DirtyState::UpToDate);
+			passer.push(producer, &3, id, 1, 10);
+			passer.push(producer, &3, id, 2, 20);
+			passer.finish(producer, &3, id);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 1 10", "push 3 2 20", "finish 3"]);
+	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
+	assert_eq!(app.world().get::<Consumer>(a).unwrap().0.last().unwrap(), "dirty 3");
+}
+
+#[test]
+fn gather_requests_every_node() {
+	use gather::BileRegisterGather;
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_gather::<Parts, StreamProducer>().register_consumer_streaming::<Parts, Consumer>();
+	let x = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(1.0))).id();
+	let y = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(2.0))).id();
+	let z = app.world_mut().spawn(StreamProducer(vec![], vec![], None)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	let (_, id) = app.world().get::<StreamProducer>(x).unwrap().0[0];
+	assert_eq!(app.world().get::<StreamProducer>(y).unwrap().0, vec![(3, id)]);
+	assert!(app.world().get::<StreamProducer>(z).unwrap().0.is_empty());
+	app.world_mut()
+		.run_system_once(move |mut passer: gather::DataPasser<Parts>| {
+			passer.start(x, &3, id, DirtyState::UpToDate);
+			passer.push(x, &3, id, 1, 10);
+			passer.finish(x, &3, id);
+			passer.push(x, &3, id, 9, 90);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 1 10"]);
+	app.world_mut()
+		.run_system_once(move |mut passer: gather::DataPasser<Parts>| {
+			passer.start(y, &3, id, DirtyState::UpToDate);
+			passer.push(y, &3, id, 2, 20);
+		})
+		.unwrap();
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<Consumer>(a).unwrap().0, vec!["start 3", "push 3 1 10", "push 3 2 20"]);
+	assert_eq!(app.world().get::<StreamProducer>(x).unwrap().1, vec![3]);
+	assert_eq!(app.world().get::<StreamProducer>(y).unwrap().1, vec![3]);
+	assert!(app.world().get::<StreamProducer>(z).unwrap().1.is_empty());
+}
+
+struct Sum;
+impl DataType for Sum {
+	type Params = u32;
+	type Data = u32;
+	type Diff = u32;
+}
+
+#[derive(Component, Default)]
+struct SumProducer(Vec<u32>, Vec<u32>);
+impl simple::DataProducingNode<Sum> for SumProducer {
+	fn cost(&self, _request: &Request<Sum>) -> Option<f32> { Some(1.0) }
+	fn request(&mut self, request: Request<Sum>) { self.0.push(request.params); }
+	fn drop(&mut self, params: &u32) { self.1.push(*params); }
+}
+
+#[derive(Component, Default)]
+struct Adder { instant: bool, pending: Option<u32>, drops: Vec<u32> }
+impl diff::DiffApplyingNode<Sum> for Adder {
+	fn cost(&self, _request: &Request<Sum>, _diffs: &[u32]) -> Option<f32> { Some(0.5) }
+	fn apply(&mut self, _params: &u32, data: &mut u32, diffs: Vec<u32>) -> bool {
+		let sum = *data + diffs.iter().sum::<u32>();
+		if self.instant { *data = sum; } else { self.pending = Some(sum); }
+		self.instant
+	}
+	fn drop(&mut self, params: &u32) { self.drops.push(*params); }
+}
+
+#[derive(Component, Default)]
+struct SumConsumer(Vec<String>);
+impl simple::DataConsumingNode<Sum> for SumConsumer {
+	fn pass_data(&mut self, _params: &u32, _tick: u64, data: u32) { self.0.push(format!("pass {data}")); }
+	fn dirty_data(&mut self, _params: &u32, _tick: u64, diff: Option<&u32>) { self.0.push(format!("dirty {diff:?}")); }
+}
+
+fn request_sum(app: &mut App, entity: Entity) -> Option<u32> {
+	app.world_mut().run_system_once(move |mut requester: simple::DataRequester<Sum>| requester.request(Request::new(3, DirtyState::UpToDate), entity)).unwrap()
+}
+fn pass_sum(app: &mut App, source: Entity, data: u32) {
+	app.world_mut().run_system_once(move |mut passer: simple::DataPasser<Sum>| passer.pass_data(source, &3, DirtyState::UpToDate, data)).unwrap();
+}
+fn dirty_sum(app: &mut App, diff: Option<u32>) {
+	app.world_mut().run_system_once(move |mut dirtier: simple::DataDirtier<Sum>| dirtier.mark_dirty(&3, diff.as_ref())).unwrap();
+}
+fn sum_app(instant: bool) -> (App, Entity, Entity, Entity) {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_simple::<Sum, SumProducer>().register_consumer_simple::<Sum, SumConsumer>().register_diff_applier_simple::<Sum, Adder>();
+	let producer = app.world_mut().spawn(SumProducer::default()).id();
+	let adder = app.world_mut().spawn(Adder { instant, ..default() }).id();
+	let consumer = app.world_mut().spawn(SumConsumer::default()).id();
+	app.update();
+	assert_eq!(request_sum(&mut app, consumer), None);
+	pass_sum(&mut app, producer, 30);
+	app.update();
+	dirty_sum(&mut app, Some(5));
+	(app, producer, adder, consumer)
+}
+
+#[test]
+fn diffs_are_applied_instead_of_producing_again() {
+	let (mut app, producer, adder, consumer) = sum_app(true);
+	assert_eq!(app.world().get::<SumConsumer>(consumer).unwrap().0, vec!["pass 30", "dirty Some(5)"]);
+	assert_eq!(request_sum(&mut app, consumer), Some(35));
+	dirty_sum(&mut app, Some(1));
+	dirty_sum(&mut app, Some(2));
+	assert_eq!(request_sum(&mut app, consumer), Some(38));
+	app.update();
+	assert_eq!(app.world().get::<SumProducer>(producer).unwrap().0, vec![3]);
+	assert!(app.world().get::<SumProducer>(producer).unwrap().1.is_empty());
+	// a dirty without a diff ends the run and the producer has to make the data again
+	dirty_sum(&mut app, Some(1));
+	dirty_sum(&mut app, None);
+	dirty_sum(&mut app, Some(1));
+	assert_eq!(request_sum(&mut app, consumer), None);
+	assert_eq!(app.world().get::<SumProducer>(producer).unwrap().0, vec![3, 3]);
+	pass_sum(&mut app, producer, 100);
+	app.update();
+	assert_eq!(app.world().get::<SumConsumer>(consumer).unwrap().0.last().unwrap(), "pass 100");
+	assert_eq!(app.world().get::<Adder>(adder).unwrap().drops, vec![3]);
+	assert!(app.world().get::<SumProducer>(producer).unwrap().1.is_empty());
+	app.world_mut().run_system_once(move |mut requester: simple::DataRequester<Sum>| requester.cancel(&3, consumer)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<SumProducer>(producer).unwrap().1, vec![3]);
+}
+
+#[test]
+fn diffs_can_be_applied_later() {
+	let (mut app, producer, adder, consumer) = sum_app(false);
+	assert_eq!(request_sum(&mut app, consumer), None);
+	assert_eq!(app.world().get::<Adder>(adder).unwrap().pending, Some(35));
+	dirty_sum(&mut app, Some(7)); // not in the data the adder is working on
+	pass_sum(&mut app, adder, 35);
+	app.update();
+	assert_eq!(app.world().get::<SumProducer>(producer).unwrap().0, vec![3]);
+	assert!(app.world().get::<SumProducer>(producer).unwrap().1.is_empty());
+	assert_eq!(request_sum(&mut app, consumer), None);
+	assert_eq!(app.world().get::<Adder>(adder).unwrap().pending, Some(42));
+	pass_sum(&mut app, adder, 42);
+	app.update();
+	assert_eq!(app.world().get::<SumConsumer>(consumer).unwrap().0.last().unwrap(), "pass 42");
+	assert_eq!(request_sum(&mut app, consumer), Some(42));
+	app.world_mut().run_system_once(move |mut requester: simple::DataRequester<Sum>| requester.cancel(&3, consumer)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<SumProducer>(producer).unwrap().1, vec![3]);
+	assert_eq!(app.world().get::<Adder>(adder).unwrap().drops, vec![3]);
+}
