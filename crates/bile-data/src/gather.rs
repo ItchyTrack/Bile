@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_trait_query::RegisterExt;
 
-use crate::{default::StreamingDataType, streaming};
+use crate::streaming::{self, StreamingDataType};
 
 // Every node streams only its own resposibility. The storage requests them all and gathers that into one stream.
 // (Only the gather step. This does not manage ownership transfer)
