@@ -6,14 +6,14 @@ use bevy::{
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{default::{self, BileDataSchedule, BileDataSystemSet, DataRequestingAPI, DataType, DirtyState, Request, StateTick, StreamingDataType, best, downcast}, streaming};
+use crate::{diff::DiffApplyingNode, default::{self, BileDataSchedule, BileDataSystemSet, DataRequestingAPI, DataType, DirtyState, Request, StateTick, StreamingDataType, best, downcast}, streaming};
 
 // Simple Consuming
 
 #[bevy_trait_query::queryable]
 pub trait DataConsumingNode<DT: DataType> {
 	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data);
-	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>); // will be passed the diff later
+	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
 }
 
 pub type DataRequester<'w, 's, DT> = default::DataRequester<'w, 's, Request<DT>>;
@@ -28,13 +28,17 @@ pub trait DataProducingNode<DT: DataType> {
 }
 
 pub type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>;
+type DiffApplyingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DiffApplyingNode<DT>>, Entity)>;
+type DataNodes<'w, 's, DT> = ParamSet<'w, 's, (DataProducingNodes<'static, 'static, DT>, DiffApplyingNodes<'static, 'static, DT>)>;
 
 // Simple Producing Data
 pub struct DataInfo<DT: DataType> {
 	pub dirty_state: DirtyState,
 	pub data: Option<DT::Data>, // None if the column does not cache
 	pub usages: HashSet<Entity>,
-	pub source_entity: Entity,
+	pub source_entity: Entity, // the node that made the latest version of the data
+	chain: Vec<Entity>, // the nodes that made the versions before it. Their data is out of date and not stored.
+	diffs: Option<Vec<DT::Diff>>, // everything the data was dirtied with. None if it is not known and so can not be applied.
 }
 
 // With `CACHE` false the column only keeps track of the data and the requester has to store it.
@@ -102,16 +106,22 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 		let Some(info) = self.data.get_mut(params) else { return; };
 		info.usages.remove(&requester_node);
 		if info.usages.is_empty() && empty_finished && !self.waiting.contains_key(params) {
-			self.data_to_drop.entry(params.clone()).or_default().insert(info.source_entity);
+			let sources = self.data_to_drop.entry(params.clone()).or_default();
+			sources.insert(info.source_entity);
+			sources.extend(info.chain.drain(..));
 			self.data.remove(params);
 		}
 	}
 	fn uses(&self, params: &DT::Params, source_entity: Entity) -> bool {
-		self.waiting.contains_key(params) || self.data.get(params).is_some_and(|info| info.source_entity == source_entity)
+		self.waiting.contains_key(params) || self.data.get(params).is_some_and(|info| info.source_entity == source_entity || info.chain.contains(&source_entity))
 	}
 	fn mark_dirty(&mut self, data_consuming_nodes: &mut Query<One<&'static mut dyn DataConsumingNode<DT>>>, params: &DT::Params, tick: u64, diff: Option<&DT::Diff>) {
 		let Some(info) = self.data.get_mut(params) else { return; };
 		info.dirty_state = DirtyState::Dirty { tick };
+		match (&mut info.diffs, diff) {
+			(Some(diffs), Some(diff)) => diffs.push(diff.clone()),
+			_ => info.diffs = None, // There may never be a dirty inbetween 2 diffs
+		}
 		info.usages.retain(|&usage| {
 			let Ok(mut data_consuming_node) = data_consuming_nodes.get_mut(usage) else {
 				bevy::log::error!(name: "Missing DataConsumingNode", "Usage was not removed for non existent DataConsumingNode {}.", usage);
@@ -133,24 +143,30 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 			return; /* No need to store data thats not wanted */
 		};
 
-		match self.data.entry(params.clone()) {
+		let diffs = (CACHE && matches!(dirty_state, DirtyState::UpToDate)).then(Vec::new);
+		let dirty_state = match self.data.entry(params.clone()) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
 				let info = entry.get_mut();
-				info.dirty_state = dirty_state;
 				info.data = CACHE.then(|| data.clone());
 				if info.source_entity != source_entity {
-					let old_source_entity = info.source_entity;
-					info.source_entity = source_entity;
 					let old_sources = self.data_to_drop.entry(params.clone()).or_default();
+					old_sources.extend(info.chain.drain(..));
+					old_sources.insert(std::mem::replace(&mut info.source_entity, source_entity));
 					old_sources.remove(&source_entity);
-					old_sources.insert(old_source_entity);
 				}
+				// A source with a chain applied diffs. What was dirtied after it got them is not in its data.
+				if info.chain.is_empty() || info.diffs.as_ref().is_some_and(Vec::is_empty) {
+					info.dirty_state = dirty_state;
+					info.diffs = diffs;
+				}
+				info.dirty_state
 			}
 			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert(DataInfo { dirty_state, data: CACHE.then(|| data.clone()), usages: HashSet::default(), source_entity });
+				entry.insert(DataInfo { dirty_state, data: CACHE.then(|| data.clone()), usages: HashSet::default(), source_entity, chain: Vec::new(), diffs });
 				self.data_to_drop.entry(params.clone()).or_default().remove(&source_entity);
+				dirty_state
 			}
-		}
+		};
 
 		let finished = self.finished.entry(params.clone()).or_insert_with(|| (HashSet::default(), data.clone()));
 		finished.1 = data.clone();
@@ -168,14 +184,41 @@ impl<DT: DataType, const CACHE: bool> DataColumn<DT, CACHE> {
 	}
 }
 
+impl<DT: DataType> DataColumn<DT> {
+	// The cheapest node that can bring the stored data up to date with the diffs it was dirtied with
+	fn best_diff(&self, diff_applying_node: &DiffApplyingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
+		let info = self.data.get(&request.params).filter(|info| info.data.is_some() && !info.dirty_state.satisfies(&request.allowed_tick))?;
+		let diffs = info.diffs.as_ref().filter(|diffs| !diffs.is_empty())?;
+		best(diff_applying_node.iter().map(|(node, entity)| (node.cost(request, diffs), entity)))
+	}
+}
+
 impl<DT: DataType> DataRequestingAPI<Request<DT>> for DataColumn<DT> {
-	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<DataProducingNodes<DT>>(ParamBuilder) }
+	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<DataNodes<DT>>(ParamBuilder) }
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
-		let data_producing_node: DataProducingNodes<DT> = downcast(dyn_system_params);
-		best(data_producing_node.iter().map(|(node, entity)| (node.cost(request), entity))).map(|best| best.0)
+		let mut data_nodes: DataNodes<DT> = downcast(dyn_system_params);
+		let diff_cost = self.best_diff(&data_nodes.p1(), request).map(|best| best.0);
+		let node_cost = best(data_nodes.p0().iter().map(|(node, entity)| (node.cost(request), entity))).map(|best| best.0);
+		[diff_cost, node_cost].into_iter().flatten().reduce(f32::min)
 	}
 	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		self.request(&mut downcast(dyn_system_params), request, requester_node)
+		let mut data_nodes: DataNodes<DT> = downcast(dyn_system_params);
+		let node_cost = best(data_nodes.p0().iter().map(|(node, entity)| (node.cost(&request), entity))).map(|best| best.0);
+		if let Some((cost, node_entity)) = self.best_diff(&data_nodes.p1(), &request) && node_cost.is_none_or(|node_cost| cost < node_cost) {
+			let info = self.data.get_mut(&request.params).expect("This must exist as it was found in best_diff");
+			let (data, diffs) = (info.data.as_mut().expect("This must exist as it was found in best_diff"), info.diffs.replace(Vec::new()).expect("This must exist as it was found in best_diff"));
+			let applied = data_nodes.p1().get_mut(node_entity).expect("This must exist as it was found in best_diff").0.apply(&request.params, data, diffs);
+			info.dirty_state = DirtyState::UpToDate;
+			if info.source_entity != node_entity {
+				info.chain.push(std::mem::replace(&mut info.source_entity, node_entity));
+			}
+			if !applied {
+				info.data = None; // The node passes the new data later and the old data is not worth caching
+				self.waiting.entry(request.params).or_default().insert(requester_node, request.allowed_tick);
+				return None;
+			}
+		}
+		self.request(&mut data_nodes.p0(), request, requester_node)
 	}
 	fn cancel(&mut self, _dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity) { self.cancel(params, requester_node); }
 }
@@ -282,7 +325,7 @@ pub fn pass_data<DT: DataType, const CACHE: bool>(
 pub fn drop_data<DT: DataType>(
 	mut data_column: ResMut<DataColumn<DT>>,
 	mut uncached_data_column: ResMut<DataColumn<DT, false>>,
-	mut data_producing_nodes: Query<One<&'static mut dyn DataProducingNode<DT>>>,
+	mut data_nodes: DataNodes<DT>,
 ) {
 	let mut data_to_drop = std::mem::take(&mut data_column.data_to_drop);
 	for (params, sources) in std::mem::take(&mut uncached_data_column.data_to_drop) {
@@ -291,8 +334,8 @@ pub fn drop_data<DT: DataType>(
 	for (params, sources) in data_to_drop {
 		for source_entity in sources {
 			if data_column.uses(&params, source_entity) || uncached_data_column.uses(&params, source_entity) { continue; }
-			let Ok(mut node) = data_producing_nodes.get_mut(source_entity) else { continue; };
-			node.drop(&params);
+			if let Ok((mut node, _)) = data_nodes.p0().get_mut(source_entity) { node.drop(&params); }
+			if let Ok((mut node, _)) = data_nodes.p1().get_mut(source_entity) { node.drop(&params); }
 		}
 	}
 }
@@ -316,6 +359,8 @@ pub trait BileRegisterSimple {
     where DT: DataType, C: Component + DataConsumingNode<DT>;
 	fn register_streaming_simple<SDT>(&mut self) -> &mut Self
     where SDT: StreamingDataType<Params = <<SDT as StreamingDataType>::DataType as DataType>::Params>;
+	fn register_diff_applier_simple<DT, C>(&mut self) -> &mut Self
+    where DT: DataType, C: Component + DiffApplyingNode<DT>;
 }
 
 impl BileRegisterSimple for App {
@@ -343,5 +388,11 @@ impl BileRegisterSimple for App {
 			.add_systems(BileDataSchedule, pass_streamed_data::<SDT>.in_set(BileDataSystemSet::PassData).after(pass_data::<SDT::DataType, true>));
 		setup_bevy_resources::<SDT::DataType>(self);
         self
+    }
+
+    fn register_diff_applier_simple<DT, C>(&mut self) -> &mut Self
+    where DT: DataType, C: Component + DiffApplyingNode<DT>,
+    {
+        self.register_component_as::<dyn DiffApplyingNode<DT>, C>()
     }
 }
