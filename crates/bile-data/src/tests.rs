@@ -238,3 +238,12 @@ fn diffs_can_be_applied_later() {
 	assert_eq!(app.world().get::<SumProducer>(producer).unwrap().1, vec![3]);
 	assert_eq!(app.world().get::<Adder>(adder).unwrap().drops, vec![3]);
 }
+
+#[test]
+fn dirtying_updates_the_state_tick() {
+	let (mut app, ..) = sum_app(true);
+	let tick = app.world().resource::<StateTick>().current_tick();
+	dirty_sum(&mut app, None);
+	dirty_sum(&mut app, None);
+	assert_eq!(app.world().resource::<StateTick>().current_tick(), tick + 2);
+}
