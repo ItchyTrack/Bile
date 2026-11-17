@@ -94,7 +94,7 @@ fn update_grass_meshes(
 		heightmaps.cancel(&tile_key, entity);
 	}
 	for tile_key in std::mem::take(&mut node.requested) {
-		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity, true) {
+		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
 			node.ready.push((tile_key, heights));
 		}
 	}

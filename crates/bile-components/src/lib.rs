@@ -3,10 +3,6 @@ use std::collections::HashMap;
 use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*, transform::TransformSystems};
 use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
 
-// TODO: Redo this do add a new bile storage type that does not impl API type.
-// The storage uses bevy components and requestes from simple nodes (can add others trivaily).
-// Then when an Added<C> is added we then make the request.
-
 #[cfg(test)]
 mod tests;
 
@@ -103,40 +99,23 @@ impl WantCommands for EntityCommands<'_> {
 	}
 }
 
-#[derive(Resource)]
-struct RemovedWants<DT: ComponentData> {
-	removed: Vec<(Entity, DT::Params)>,
-}
-
-impl<DT: ComponentData> Default for RemovedWants<DT> {
-	fn default() -> Self {
-		Self { removed: Vec::new() }
-	}
-}
-
-fn queue_removed_want<DT: ComponentData>(remove: On<Remove<Want<DT>>>, wants: Query<&Want<DT>>, mut removed: ResMut<RemovedWants<DT>>) {
-	let Ok(want) = wants.get(remove.entity) else { return };
-	removed.removed.push((remove.entity, want.params.clone()));
+fn cancel_removed_want<DT: ComponentData>(remove: On<Remove<Want<DT>>>, wants: Query<&Want<DT>>, mut data_column: ResMut<simple::DataColumn<DT, false>>) {
+	data_column.cancel(&wants.get(remove.entity).expect("The Want is only removed after this").params, remove.entity);
 }
 
 fn update_wants<DT: ComponentData>(
 	mut commands: Commands,
 	component: ComponentIdFor<DT::Component>,
-	mut requester: simple::DataRequester<DT>,
-	mut removed: ResMut<RemovedWants<DT>>,
+	mut data_column: ResMut<simple::DataColumn<DT, false>>,
+	mut data_producing_node: simple::DataProducingNodes<DT>,
 	mut resolved: MessageWriter<ComponentResolved>,
 	mut wants: Query<(Entity, &mut Want<DT>), Changed<Want<DT>>>,
 ) {
-	for (entity, params) in removed.removed.drain(..) {
-		requester.cancel(&params, entity);
-	}
 	for (entity, mut want) in &mut wants {
 		let want = want.bypass_change_detection();
 		if !want.requested {
 			want.requested = true;
-			if let Some(data) = requester.request(Request::new(want.params.clone(), DirtyState::UpToDate), entity, false) {
-				want.received = Some(data);
-			}
+			data_column.request(&mut data_producing_node, Request::new(want.params.clone(), DirtyState::UpToDate), entity);
 		}
 		let Some(data) = want.received.take() else { continue };
 		match data {
@@ -160,9 +139,8 @@ impl AddComponentData for App {
 		let want = self.world_mut().register_component::<Want<DT>>();
 		self.world_mut().get_resource_or_init::<ComponentDataRegistry>().wants_by_component.entry(component).or_default().push((want, unwant::<DT>));
 		self.add_message::<ComponentResolved>()
-			.init_resource::<RemovedWants<DT>>()
 			.register_consumer_simple::<DT, Want<DT>>()
-			.add_observer(queue_removed_want::<DT>)
+			.add_observer(cancel_removed_want::<DT>)
 			.add_systems(PostUpdate, update_wants::<DT>.before(TransformSystems::Propagate))
 	}
 }
