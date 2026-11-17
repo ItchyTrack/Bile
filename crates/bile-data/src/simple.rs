@@ -1,6 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{
+	ecs::{
+		change_detection::Tick,
+		system::{DynParamBuilder, DynSystemParam, DynSystemParamState, ParamBuilder, SystemAccess, SystemMeta, SystemParam, SystemParamValidationError},
+		world::{DeferredWorld, unsafe_world_cell::UnsafeWorldCell},
+	},
+	prelude::*,
+};
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick};
@@ -15,45 +22,62 @@ pub trait DataConsumingNode<DT: DataType> {
 
 #[bevy_trait_query::queryable]
 pub trait DataRequestingAPI<DT: DataType> {
-	fn cost(&self, dyn_system_param_stuff: u32, request: &Request<DT>) -> Option<f32>;
-	fn request(&mut self, dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data>;
-	fn cancel(&mut self, dyn_system_param_stuff: u32, params: &DT::Params, requester_node: Entity);
+	fn dyn_system_param(&self) -> DynParamBuilder<'static>;
+	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32>;
+	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data>;
+	fn cancel(&mut self, dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity);
 }
 
-// TODO: Add `DynSystemParam`s to allow quering of data from implementations of `DataProducingNode`.
-#[derive(SystemParam)]
 pub struct DataRequester<'w, 's, DT: DataType> {
 	data_requesting_apis: Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>,
+	dyn_system_params: Vec<DynSystemParam<'w, 's>>,
+}
+
+// SAFETY: Delegates to the tuple of its fields, only the states of the `DynSystemParam`s are built by the APIs instead of being empty.
+unsafe impl<DT: DataType> SystemParam for DataRequester<'_, '_, DT> {
+	type State = (QueryState<(One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>, Vec<DynSystemParamState>);
+	type Item<'w, 's> = DataRequester<'w, 's, DT>;
+	fn init_state(world: &mut World) -> Self::State {
+		let dyn_system_params: Vec<_> = world.query::<One<&dyn DataRequestingAPI<DT>>>().iter(world).map(|data_requesting_api| data_requesting_api.dyn_system_param()).collect();
+		(Query::init_state(world), dyn_system_params.into_iter().map(|dyn_system_param| dyn_system_param.build(world)).collect())
+	}
+	fn init_access(state: &Self::State, system_meta: &mut SystemMeta, system_access: &mut SystemAccess, world: &mut World) {
+		<(Query<_>, Vec<DynSystemParam>)>::init_access(state, system_meta, system_access, world);
+	}
+	fn apply(state: &mut Self::State, system_meta: &SystemMeta, world: &mut World) { <(Query<_>, Vec<DynSystemParam>)>::apply(state, system_meta, world); }
+	fn queue(state: &mut Self::State, system_meta: &SystemMeta, world: DeferredWorld) { <(Query<_>, Vec<DynSystemParam>)>::queue(state, system_meta, world); }
+	unsafe fn get_param<'w, 's>(state: &'s mut Self::State, system_meta: &SystemMeta, world: UnsafeWorldCell<'w>, change_tick: Tick) -> Result<Self::Item<'w, 's>, SystemParamValidationError> {
+		let (data_requesting_apis, dyn_system_params) = unsafe { <(Query<_>, Vec<DynSystemParam>)>::get_param(state, system_meta, world, change_tick) }?;
+		Ok(DataRequester { data_requesting_apis, dyn_system_params })
+	}
 }
 
 impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data> {
-		let api_entity = Self::best_api(&self.data_requesting_apis, &request);
+		let api_entity = best(self.data_requesting_apis.iter().map(|(data_requesting_api, entity)| (data_requesting_api.cost(&mut self.dyn_system_params, &request), entity))).1;
 		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
 			if entity == api_entity { continue; }
-			data_requesting_api.cancel(0, &request.params, requester_node);
+			data_requesting_api.cancel(&mut self.dyn_system_params, &request.params, requester_node);
 		}
-		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(0, request, requester_node, cache)
+		self.data_requesting_apis.get_mut(api_entity).expect("This must exist as it was found in best_node").0.request(&mut self.dyn_system_params, request, requester_node, cache)
 	}
 	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
 		for (mut data_requesting_api, _entity) in self.data_requesting_apis.iter_mut() {
-			data_requesting_api.cancel(0, params, requester_node);
+			data_requesting_api.cancel(&mut self.dyn_system_params, params, requester_node);
 		}
 	}
-	fn best_api(data_requesting_apis: &Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>, request: &Request<DT>) -> Entity {
-		let mut best = (f32::MAX, None);
-		for (data_requesting_api, entity) in data_requesting_apis.iter() {
-			let Some(cost) = data_requesting_api.cost(0, request) else { continue; };
-			if best.0 > cost {
-				best.0 = cost;
-				best.1 = Some(entity);
-			}
-		}
-		let Some(entity) = best.1 else {
-			panic!("Data request failed to find node to fulfill the request. This should never happen!");
-		};
-		entity
-	}
+}
+
+pub fn downcast<'a, T: SystemParam>(dyn_system_params: &'a mut [DynSystemParam]) -> T
+where T::Item<'static, 'static>: SystemParam<Item<'a, 'a> = T> + 'static {
+	dyn_system_params.iter_mut().find_map(|dyn_system_param| dyn_system_param.downcast_mut()).expect("Every API is given the param from its dyn_system_param")
+}
+
+fn best(costs: impl Iterator<Item = (Option<f32>, Entity)>) -> (f32, Entity) {
+	costs
+		.filter_map(|(cost, entity)| Some((cost?, entity)))
+		.min_by(|a, b| a.0.total_cmp(&b.0))
+		.expect("Data request failed to find node to fulfill the request. This should never happen!")
 }
 
 // Simple Producing
@@ -86,23 +110,6 @@ pub struct DataColumn<DT: DataType> {
 	waiting: HashMap<DT::Params, HashMap<Entity, Waiter>>,
 }
 
-impl<DT: DataType> DataColumn<DT> {
-	fn best_node<'w, 's>(data_producing_node: &Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>, request: &Request<DT>) -> (f32, Entity) {
-		let mut best = (f32::MAX, None);
-		for (node, entity) in data_producing_node.iter() {
-			let Some(cost) = node.cost(request) else { continue; };
-			if best.0 > cost {
-				best.0 = cost;
-				best.1 = Some(entity);
-			}
-		}
-		let Some(entity) = best.1 else {
-			panic!("Data request failed to find node to fulfill the request. This should never happen!");
-		};
-		(best.0, entity)
-	}
-}
-
 impl<DT: DataType> Default for DataColumn<DT> {
 	fn default() -> Self {
 		Self {
@@ -119,10 +126,12 @@ impl<DT: DataType> DataColumn<DT> {
 }
 
 impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
-	fn cost(&self, _dyn_system_param_stuff: u32, request: &Request<DT>) -> Option<f32> {
-		Some(Self::best_node(data_producing_node, request).0)
+	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<Query<(One<&mut dyn DataProducingNode<DT>>, Entity)>>(ParamBuilder) }
+	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
+		let data_producing_node: Query<(One<&mut dyn DataProducingNode<DT>>, Entity)> = downcast(dyn_system_params);
+		Some(best(data_producing_node.iter().map(|(node, entity)| (node.cost(request), entity))).0)
 	}
-	fn request(&mut self, _dyn_system_param_stuff: u32, request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data> {
+	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity, cache: bool) -> Option<DT::Data> {
 		if let Some(info) = self.data.get_mut(&request.params) {
 			if info.dirty_state.satisfies(&request.allowed_tick) {
 				if let Some(data) = &info.data {
@@ -136,7 +145,8 @@ impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
 		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, Waiter { allowed_tick: request.allowed_tick, cache });
 		if already_requested { return None; }
 		// get node
-		let node_entity = Self::best_node(&data_producing_node, &request).1;
+		let mut data_producing_node: Query<(One<&mut dyn DataProducingNode<DT>>, Entity)> = downcast(dyn_system_params);
+		let node_entity = best(data_producing_node.iter().map(|(node, entity)| (node.cost(&request), entity))).1;
 		let mut node = data_producing_node.get_mut(node_entity).expect("This must exist as it was found in best_node").0;
 		if let Some(sources) = self.data_to_drop.get_mut(&request.params) {
 			sources.remove(&node_entity);
@@ -145,7 +155,7 @@ impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
 		node.request(request);
 		None
 	}
-	fn cancel(&mut self, _dyn_system_param_stuff: u32, params: &DT::Params, requester_node: Entity) {
+	fn cancel(&mut self, _dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity) {
 		if let Some(waiting) = self.waiting.get_mut(params) {
 			waiting.remove(&requester_node);
 			if waiting.is_empty() {
