@@ -328,3 +328,52 @@ fn finished_gather_is_released_when_its_last_user_cancels() {
 	assert_ne!(requests[1].1, id);
 	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, *requests);
 }
+
+#[test]
+fn gather_replacing_a_live_stream_does_not_drop_its_nodes() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_gather::<Parts, GatherProducer>().register_consumer_streaming::<Parts, Consumer>();
+	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
+	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
+	let z = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(3.0))).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	let (_, old_id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(x, &3, old_id, DirtyState::UpToDate);
+			passer.push(x, &3, old_id, 10);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10"]);
+	// the data is dirtied while y and z are still producing it and is requested again, z has nothing for it anymore
+	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
+	app.world_mut().get_mut::<GatherProducer>(z).unwrap().2 = None;
+	request_parts(&mut app, a);
+	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[1];
+	assert_ne!(id, old_id);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, old_id), (3, id)]);
+	assert_eq!(app.world().get::<GatherProducer>(z).unwrap().0, vec![(3, old_id)]);
+	app.world_mut().run_system_once(move |mut passer: streaming::DataPasser<Parts>| passer.start(x, &3, id, DirtyState::UpToDate)).unwrap();
+	app.update();
+	// x and y produce the new stream now, a drop would stop that too; only z is no longer needed
+	assert!(app.world().get::<GatherProducer>(x).unwrap().1.is_empty());
+	assert!(app.world().get::<GatherProducer>(y).unwrap().1.is_empty());
+	assert_eq!(app.world().get::<GatherProducer>(z).unwrap().1, vec![3]);
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.push(x, &3, id, 11);
+			passer.finish(x, &3, id);
+			passer.push(y, &3, old_id, 20); // of the replaced stream
+			passer.start(y, &3, id, DirtyState::UpToDate);
+			passer.push(y, &3, id, 21);
+			passer.finish(y, &3, id);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "dirty 3", "start 3", "push 3 11", "push 3 21", "finish 3"]);
+	assert!(app.world().get::<GatherProducer>(x).unwrap().1.is_empty());
+	assert!(app.world().get::<GatherProducer>(y).unwrap().1.is_empty());
+}

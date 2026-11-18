@@ -148,8 +148,9 @@ impl<SDT: StreamingDataType> DataStorage<SDT> for DataColumn<SDT> {
 		};
 
 		if let Some(old) = self.streams.remove(params) {
-			// supersede whatever was there, live or not; if it was still live, tell it to stop too
-			let old_sources = old.sources.into_iter().filter(|old_source| !old.live.is_empty() || !sources.contains(old_source));
+			// supersede whatever was there, live or not; the nodes that are not part of the new stream are told to stop.
+			// The others replaced their old work when they got the new request, a drop would stop the new stream too.
+			let old_sources = old.sources.into_iter().filter(|old_source| !sources.contains(old_source));
 			self.data_to_drop.entry(params.clone()).or_default().extend(old_sources);
 		}
 
