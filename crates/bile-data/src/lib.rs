@@ -1,4 +1,4 @@
-pub mod default;
+pub mod setup;
 pub mod diff;
 pub mod dyn_system_params;
 pub mod gather;
@@ -7,13 +7,9 @@ pub mod streaming;
 
 use bevy::prelude::*;
 
-use crate::{default::BileDataDefaultPlugin};
+use crate::{setup::BileDataDefaultPlugin};
 
-pub use default::{StateTick, DataType, DirtyState, Request, BileDataSchedule, BileDataSystemSet};
-
-pub trait BileAddDataType {
-	fn bile_add_data_type<DT: DataType>(&mut self) -> &mut Self;
-}
+pub use setup::{StateTick, DirtyState, BileDataSchedule, BileDataSystemSet};
 
 #[derive(Default)]
 pub struct BileDataPlugin;

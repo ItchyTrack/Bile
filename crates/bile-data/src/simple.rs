@@ -1,23 +1,38 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, hash::Hash};
 
 use bevy::{
-	ecs::system::{DynParamBuilder, DynSystemParam, ParamBuilder, SystemParam},
-	prelude::*,
+	ecs::system::{DynParamBuilder, DynSystemParam, ParamBuilder, SystemParam}, prelude::*,
 };
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{default::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}, diff::{self, DiffApplyingNodes}, dyn_system_params::{DynSystemParams, HasDynSystemParam, downcast}};
+use crate::{
+	diff::{self, DiffApplyingNodes}, dyn_system_params::{DynSystemParams, HasDynSystemParam, downcast}, setup::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}
+};
 
-// Simple Consuming
+// ============================ Data Type ============================
+
+pub trait SimpleDataType: 'static {
+    type Params: Clone + Hash + PartialEq + Eq + Send + Sync + 'static;
+    type Data: Clone + Send + Sync + 'static;
+    type Diff: Clone + Send + Sync + 'static;
+}
+
+impl<DT: SimpleDataType> DataType for DT {
+	type Params = <DT as SimpleDataType>::Params;
+	type Data = <DT as SimpleDataType>::Data;
+	type Diff = <DT as SimpleDataType>::Diff;
+}
+
+// ============================ Consuming ============================
 
 #[bevy_trait_query::queryable]
-pub trait DataConsumingNode<DT: DataType> {
+pub trait DataConsumingNode<DT: SimpleDataType> {
 	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data);
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
 }
 
 #[bevy_trait_query::queryable]
-pub trait DataRequestingAPI<DT: DataType> {
+pub trait DataRequestingAPI<DT: SimpleDataType> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static>;
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32>;
 	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity) -> Option<DT::Data>;
@@ -25,16 +40,16 @@ pub trait DataRequestingAPI<DT: DataType> {
 }
 
 #[derive(SystemParam)]
-pub struct DataRequester<'w, 's, DT: DataType> {
+pub struct DataRequester<'w, 's, DT: SimpleDataType> {
 	data_requesting_apis: Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>,
 	dyn_system_params: DynSystemParams<'w, 's, dyn DataRequestingAPI<DT>>,
 }
 
-impl<DT: DataType> HasDynSystemParam for dyn DataRequestingAPI<DT> {
+impl<DT: SimpleDataType> HasDynSystemParam for dyn DataRequestingAPI<DT> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DataRequestingAPI::dyn_system_param(self) }
 }
 
-impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
+impl<'w, 's, DT: SimpleDataType> DataRequester<'w, 's, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
 		let api_entity = Self::best_api(&self.data_requesting_apis, &mut self.dyn_system_params.0, &request);
 		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
@@ -64,10 +79,10 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	}
 }
 
-// Simple Producing
+// ============================ Producing ============================
 
 #[bevy_trait_query::queryable]
-pub trait DataProducingNode<DT: DataType> {
+pub trait DataProducingNode<DT: SimpleDataType> {
 	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request
 	fn request(&mut self, request: Request<DT>);
 	fn drop(&mut self, params: &DT::Params);
@@ -77,7 +92,7 @@ pub type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn Da
 pub type DataConsumingNodes<'w, 's, DT> = Query<'w, 's, One<&'static mut dyn DataConsumingNode<DT>>>;
 
 // None if no node can fulfill the request
-pub fn best_node<DT: DataType>(data_producing_node: &DataProducingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
+pub fn best_node<DT: SimpleDataType>(data_producing_node: &DataProducingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
 	let mut best = (f32::MAX, None);
 	for (node, entity) in data_producing_node.iter() {
 		let Some(cost) = node.cost(request) else { continue; };
@@ -91,7 +106,7 @@ pub fn best_node<DT: DataType>(data_producing_node: &DataProducingNodes<DT>, req
 
 // Every storage gets what the nodes pass and dirty, there can be any number of them and they do not know each other.
 #[bevy_trait_query::queryable]
-pub trait DataStorage<DT: DataType> {
+pub trait DataStorage<DT: SimpleDataType> {
 	fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: &DT::Data);
 	fn dirty_data(&mut self, data_consuming_nodes: &mut DataConsumingNodes<DT>, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
 	fn uses(&self, params: &DT::Params, source_entity: Entity) -> bool; // a node is only dropped when no storage uses it
@@ -99,13 +114,13 @@ pub trait DataStorage<DT: DataType> {
 }
 
 #[derive(SystemParam)]
-pub struct DataDirtier<'w, 's, DT: DataType> {
+pub struct DataDirtier<'w, 's, DT: SimpleDataType> {
 	bile_state_tick: Res<'w, StateTick>,
 	data_storages: Query<'w, 's, One<&'static mut dyn DataStorage<DT>>>,
 	data_consuming_nodes: DataConsumingNodes<'w, 's, DT>,
 }
 
-impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
+impl<'w, 's, DT: SimpleDataType> DataDirtier<'w, 's, DT> {
 	pub fn mark_dirty(&mut self, params: &DT::Params, diff: Option<&DT::Diff>) {
 		let last_clean_tick = self.bile_state_tick.update(); /* Was valid on the last tick */
 		for mut data_storage in &mut self.data_storages {
@@ -115,11 +130,11 @@ impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
 }
 
 #[derive(SystemParam)]
-pub struct DataPasser<'w, 's, DT: DataType> {
+pub struct DataPasser<'w, 's, DT: SimpleDataType> {
 	data_storages: Query<'w, 's, One<&'static mut dyn DataStorage<DT>>>,
 }
 
-impl<'w, 's, DT: DataType> DataPasser<'w, 's, DT> {
+impl<'w, 's, DT: SimpleDataType> DataPasser<'w, 's, DT> {
 	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
 		for mut data_storage in &mut self.data_storages {
 			data_storage.pass_data(source_entity, params, dirty_state, &data);
@@ -127,7 +142,7 @@ impl<'w, 's, DT: DataType> DataPasser<'w, 's, DT> {
 	}
 }
 
-pub fn drop_data<DT: DataType>(
+pub fn drop_data<DT: SimpleDataType>(
 	mut data_storages: Query<One<&'static mut dyn DataStorage<DT>>>,
 	mut data_producing_nodes: Query<One<&'static mut dyn DataProducingNode<DT>>>,
 ) {
@@ -146,8 +161,8 @@ pub fn drop_data<DT: DataType>(
 	}
 }
 
-// Simple Producing Data
-pub struct DataInfo<DT: DataType> {
+// ============================ Data Storage ============================
+pub struct DataInfo<DT: SimpleDataType> {
 	pub dirty_state: DirtyState,
 	pub data: Option<DT::Data>,
 	pub usages: HashSet<Entity>,
@@ -157,14 +172,14 @@ pub struct DataInfo<DT: DataType> {
 }
 
 #[derive(Resource)]
-pub struct DataColumn<DT: DataType> {
+pub struct DataColumn<DT: SimpleDataType> {
 	data: HashMap<DT::Params, DataInfo<DT>>,
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>, // this data is no longer requested from this Entity. Either no one wants it or something else provided it.
 	finished: HashMap<DT::Params, HashSet<Entity>>,
 	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
 }
 
-impl<DT: DataType> Default for DataColumn<DT> {
+impl<DT: SimpleDataType> Default for DataColumn<DT> {
 	fn default() -> Self {
 		Self {
 			data: HashMap::default(),
@@ -177,7 +192,7 @@ impl<DT: DataType> Default for DataColumn<DT> {
 
 type DataNodes<'w, 's, DT> = ParamSet<'w, 's, (DataProducingNodes<'static, 'static, DT>, DiffApplyingNodes<'static, 'static, DT>)>;
 
-impl<DT: DataType> DataColumn<DT> {
+impl<DT: SimpleDataType> DataColumn<DT> {
 	pub fn get(&self, params: &DT::Params) -> Option<&DataInfo<DT>> { self.data.get(params) }
 	fn best_diff(&self, diff_applying_node: &DiffApplyingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
 		let info = self.data.get(&request.params).filter(|info| info.data.is_some() && !info.dirty_state.satisfies(&request.allowed_tick))?;
@@ -185,7 +200,7 @@ impl<DT: DataType> DataColumn<DT> {
 	}
 }
 
-impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
+impl<DT: SimpleDataType> DataRequestingAPI<DT> for DataColumn<DT> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<DataNodes<DT>>(ParamBuilder) }
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
 		let mut data_nodes: DataNodes<DT> = downcast(dyn_system_params);
@@ -259,7 +274,7 @@ impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
 	}
 }
 
-impl<DT: DataType> DataStorage<DT> for DataColumn<DT> {
+impl<DT: SimpleDataType> DataStorage<DT> for DataColumn<DT> {
 	fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: &DT::Data) {
 		if let Some(existing) = self.data.get(params) && existing.dirty_state.is_fresher_than(&dirty_state) {
 			return;
@@ -332,7 +347,7 @@ impl<DT: DataType> DataStorage<DT> for DataColumn<DT> {
 	fn drop_data(&mut self) -> HashMap<DT::Params, HashSet<Entity>> { std::mem::take(&mut self.data_to_drop) }
 }
 
-pub fn pass_data<DT: DataType>(
+pub fn pass_data<DT: SimpleDataType>(
 	bile_state_tick: Res<StateTick>,
 	mut data_column: ResMut<DataColumn<DT>>,
 	mut data_consuming_nodes: DataConsumingNodes<DT>,
@@ -354,7 +369,7 @@ pub fn pass_data<DT: DataType>(
 	}
 }
 
-fn setup_bevy_resources<DT: DataType>(app: &mut App) {
+fn setup_bevy_resources<DT: SimpleDataType>(app: &mut App) {
 	if app.world().contains_resource::<DataColumn<DT>>() { return; }
 	app
 		.add_systems(BileDataSchedule, (
@@ -368,14 +383,14 @@ fn setup_bevy_resources<DT: DataType>(app: &mut App) {
 
 pub trait BileRegisterSimple {
 	fn register_producer_simple<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataProducingNode<DT>;
+    where DT: SimpleDataType, C: Component + DataProducingNode<DT>;
 	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataConsumingNode<DT>;
+    where DT: SimpleDataType, C: Component + DataConsumingNode<DT>;
 }
 
 impl BileRegisterSimple for App {
     fn register_producer_simple<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataProducingNode<DT>,
+    where DT: SimpleDataType, C: Component + DataProducingNode<DT>,
     {
         self.register_component_as::<dyn DataProducingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);
@@ -383,7 +398,7 @@ impl BileRegisterSimple for App {
     }
 
     fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
-    where DT: DataType, C: Component + DataConsumingNode<DT>,
+    where DT: SimpleDataType, C: Component + DataConsumingNode<DT>,
     {
         self.register_component_as::<dyn DataConsumingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);
