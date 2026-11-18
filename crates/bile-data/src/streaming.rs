@@ -8,21 +8,6 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::{dyn_system_params::{DynSystemParams, HasDynSystemParam, downcast}, setup::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}};
 
-// ============================ Data Type ============================
-
-pub trait StreamingDataType: 'static {
-    type Params: Clone + Hash + PartialEq + Eq + Send + Sync + 'static;
-    type Data: Clone + Send + Sync + 'static;
-    type Diff: Clone + Send + Sync + 'static;
-}
-
-impl<DT: StreamingDataType> DataType for DT {
-	type Params = <DT as StreamingDataType>::Params;
-	type Data = <DT as StreamingDataType>::Data;
-	type Diff = <DT as StreamingDataType>::Diff;
-}
-
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
 
@@ -35,7 +20,7 @@ impl StreamId {
 }
 
 #[bevy_trait_query::queryable]
-pub trait DataConsumingNode<DT: StreamingDataType> {
+pub trait DataConsumingNode<DT: DataType> {
 	fn start_data(&mut self, params: &DT::Params, tick: u64);
 	fn push_data(&mut self, params: &DT::Params, data: DT::Data);
 	fn finish_data(&mut self, params: &DT::Params);
@@ -43,7 +28,7 @@ pub trait DataConsumingNode<DT: StreamingDataType> {
 }
 
 #[bevy_trait_query::queryable]
-pub trait DataRequestingAPI<DT: StreamingDataType> {
+pub trait DataRequestingAPI<DT: DataType> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static>;
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32>;
 	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity);
@@ -51,16 +36,16 @@ pub trait DataRequestingAPI<DT: StreamingDataType> {
 }
 
 #[derive(SystemParam)]
-pub struct DataRequester<'w, 's, DT: StreamingDataType> {
+pub struct DataRequester<'w, 's, DT: DataType> {
 	data_requesting_apis: Query<'w, 's, (One<&'static mut dyn DataRequestingAPI<DT>>, Entity)>,
 	dyn_system_params: DynSystemParams<'w, 's, dyn DataRequestingAPI<DT>>,
 }
 
-impl<DT: StreamingDataType> HasDynSystemParam for dyn DataRequestingAPI<DT> {
+impl<DT: DataType> HasDynSystemParam for dyn DataRequestingAPI<DT> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DataRequestingAPI::dyn_system_param(self) }
 }
 
-impl<'w, 's, DT: StreamingDataType> DataRequester<'w, 's, DT> {
+impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) {
 		let api_entity = Self::best_api(&self.data_requesting_apis, &mut self.dyn_system_params.0, &request);
 		for (mut data_requesting_api, entity) in self.data_requesting_apis.iter_mut() {
@@ -91,7 +76,7 @@ impl<'w, 's, DT: StreamingDataType> DataRequester<'w, 's, DT> {
 }
 
 #[bevy_trait_query::queryable]
-pub trait DataProducingNode<DT: StreamingDataType> {
+pub trait DataProducingNode<DT: DataType> {
 	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request
 	fn request(&mut self, request: Request<DT>, stream_id: StreamId);
 	fn drop(&mut self, params: &DT::Params);
@@ -101,7 +86,7 @@ type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataPr
 pub type DataConsumingNodes<'w, 's, DT> = Query<'w, 's, One<&'static mut dyn DataConsumingNode<DT>>>;
 
 // None if no node can fulfill the request
-fn best_node<DT: StreamingDataType>(data_producing_node: &DataProducingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
+fn best_node<DT: DataType>(data_producing_node: &DataProducingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
 	let mut best = (f32::MAX, None);
 	for (node, entity) in data_producing_node.iter() {
 		let Some(cost) = node.cost(request) else { continue; };
@@ -115,7 +100,7 @@ fn best_node<DT: StreamingDataType>(data_producing_node: &DataProducingNodes<DT>
 
 // Every storage gets what the nodes pass and dirty, there can be any number of them and they do not know each other.
 #[bevy_trait_query::queryable]
-pub trait DataStorage<DT: StreamingDataType> {
+pub trait DataStorage<DT: DataType> {
 	fn start(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId, dirty_state: DirtyState);
 	fn push(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId, data: &DT::Data);
 	fn finish(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId);
@@ -128,7 +113,7 @@ pub trait DataStorage<DT: StreamingDataType> {
 /// `finish` (with `live = false`) it is kept only while something still uses it
 /// or waits for it, so that late requesters get the replay and a staler stream
 /// is rejected. The cancel of its last user releases it and drops its source.
-struct StreamState<DT: StreamingDataType> {
+struct StreamState<DT: DataType> {
 	stream_id: StreamId,
 	source_entity: Entity,
 	dirty_state: DirtyState,
@@ -137,14 +122,14 @@ struct StreamState<DT: StreamingDataType> {
 	live: bool,
 }
 
-enum StreamEvent<DT: StreamingDataType> {
+enum StreamEvent<DT: DataType> {
 	Start { entities: HashSet<Entity> },
 	Push { entities: HashSet<Entity>, data: DT::Data },
 	Finish { entities: HashSet<Entity> },
 }
 
 #[derive(Resource)]
-pub struct DataColumn<DT: StreamingDataType> {
+pub struct DataColumn<DT: DataType> {
 	requested: HashMap<DT::Params, StreamId>, // the stream this storage waits for a node to start
 	streams: HashMap<DT::Params, StreamState<DT>>,
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>,
@@ -154,7 +139,7 @@ pub struct DataColumn<DT: StreamingDataType> {
 	events: Vec<(DT::Params, StreamEvent<DT>)>,
 }
 
-impl<DT: StreamingDataType> Default for DataColumn<DT> {
+impl<DT: DataType> Default for DataColumn<DT> {
 	fn default() -> Self {
 		Self {
 			requested: HashMap::default(),
@@ -166,7 +151,7 @@ impl<DT: StreamingDataType> Default for DataColumn<DT> {
 	}
 }
 
-impl<DT: StreamingDataType> DataRequestingAPI<DT> for DataColumn<DT> {
+impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<DataProducingNodes<DT>>(ParamBuilder) }
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
 		best_node(&downcast(dyn_system_params), request).map(|best| best.0)
@@ -217,13 +202,13 @@ impl<DT: StreamingDataType> DataRequestingAPI<DT> for DataColumn<DT> {
 }
 
 #[derive(SystemParam)]
-pub struct DataDirtier<'w, 's, DT: StreamingDataType> {
+pub struct DataDirtier<'w, 's, DT: DataType> {
 	bile_state_tick: Res<'w, StateTick>,
 	data_storages: Query<'w, 's, One<&'static mut dyn DataStorage<DT>>>,
 	data_consuming_nodes: DataConsumingNodes<'w, 's, DT>,
 }
 
-impl<'w, 's, DT: StreamingDataType> DataDirtier<'w, 's, DT> {
+impl<'w, 's, DT: DataType> DataDirtier<'w, 's, DT> {
 	pub fn mark_dirty(&mut self, params: &DT::Params, diff: Option<&DT::Diff>) {
 		let last_clean_tick = self.bile_state_tick.update();
 		for mut data_storage in &mut self.data_storages {
@@ -233,11 +218,11 @@ impl<'w, 's, DT: StreamingDataType> DataDirtier<'w, 's, DT> {
 }
 
 #[derive(SystemParam)]
-pub struct DataPasser<'w, 's, DT: StreamingDataType> {
+pub struct DataPasser<'w, 's, DT: DataType> {
 	data_storages: Query<'w, 's, One<&'static mut dyn DataStorage<DT>>>,
 }
 
-impl<'w, 's, DT: StreamingDataType> DataPasser<'w, 's, DT> {
+impl<'w, 's, DT: DataType> DataPasser<'w, 's, DT> {
 	/// Producer calls this once, before any `push`.
 	pub fn start(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId, dirty_state: DirtyState) {
 		for mut data_storage in &mut self.data_storages {
@@ -260,7 +245,7 @@ impl<'w, 's, DT: StreamingDataType> DataPasser<'w, 's, DT> {
 	}
 }
 
-impl<DT: StreamingDataType> DataStorage<DT> for DataColumn<DT> {
+impl<DT: DataType> DataStorage<DT> for DataColumn<DT> {
 	fn start(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId, dirty_state: DirtyState) {
 		if self.requested.get(params) != Some(&stream_id) { return; } // the stream of another storage
 		self.requested.remove(params);
@@ -335,7 +320,7 @@ impl<DT: StreamingDataType> DataStorage<DT> for DataColumn<DT> {
 	fn drop_data(&mut self) -> HashMap<DT::Params, HashSet<Entity>> { std::mem::take(&mut self.data_to_drop) }
 }
 
-pub fn pass_data<DT: StreamingDataType>(
+pub fn pass_data<DT: DataType>(
 	bile_state_tick: Res<StateTick>,
 	mut data_column: ResMut<DataColumn<DT>>,
 	mut data_consuming_nodes: DataConsumingNodes<DT>,
@@ -370,7 +355,7 @@ pub fn pass_data<DT: StreamingDataType>(
 	}
 }
 
-pub fn drop_data<DT: StreamingDataType>(
+pub fn drop_data<DT: DataType>(
 	mut data_storages: Query<One<&'static mut dyn DataStorage<DT>>>,
 	mut data_producing_nodes: Query<One<&'static mut dyn DataProducingNode<DT>>>,
 ) {
@@ -389,7 +374,7 @@ pub fn drop_data<DT: StreamingDataType>(
 	}
 }
 
-fn setup_bevy_resources<DT: StreamingDataType>(app: &mut App) {
+fn setup_bevy_resources<DT: DataType>(app: &mut App) {
 	if app.world().contains_resource::<DataColumn<DT>>() { return; }
 	app
 		.add_systems(BileDataSchedule, (
@@ -403,14 +388,14 @@ fn setup_bevy_resources<DT: StreamingDataType>(app: &mut App) {
 
 pub trait BileRegisterStreaming {
 	fn register_producer_streaming<DT, C>(&mut self) -> &mut Self
-	where DT: StreamingDataType, C: Component + DataProducingNode<DT>;
+	where DT: DataType, C: Component + DataProducingNode<DT>;
 	fn register_consumer_streaming<DT, C>(&mut self) -> &mut Self
-	where DT: StreamingDataType, C: Component + DataConsumingNode<DT>;
+	where DT: DataType, C: Component + DataConsumingNode<DT>;
 }
 
 impl BileRegisterStreaming for App {
 	fn register_producer_streaming<DT, C>(&mut self) -> &mut Self
-	where DT: StreamingDataType, C: Component + DataProducingNode<DT>,
+	where DT: DataType, C: Component + DataProducingNode<DT>,
 	{
 		self.register_component_as::<dyn DataProducingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);
@@ -418,7 +403,7 @@ impl BileRegisterStreaming for App {
 	}
 
 	fn register_consumer_streaming<DT, C>(&mut self) -> &mut Self
-	where DT: StreamingDataType, C: Component + DataConsumingNode<DT>,
+	where DT: DataType, C: Component + DataConsumingNode<DT>,
 	{
 		self.register_component_as::<dyn DataConsumingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);

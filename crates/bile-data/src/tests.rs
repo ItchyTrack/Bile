@@ -1,9 +1,9 @@
 use bevy::ecs::system::RunSystemOnce;
 
-use crate::{diff::BileRegisterDiff, gather::BileRegisterGather, simple::{self, BileRegisterSimple}, streaming::{self, BileRegisterStreaming, StreamingDataType}, *};
+use crate::{diff::BileRegisterDiff, gather::BileRegisterGather, simple::{self, BileRegisterSimple}, streaming::{self, BileRegisterStreaming, DataType}, *};
 
 struct Parts;
-impl StreamingDataType for Parts {
+impl DataType for Parts {
 	type Params = u32;
 	type Data = u32;
 	type Diff = ();

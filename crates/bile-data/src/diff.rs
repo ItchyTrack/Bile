@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{default::{DataType, Request}, simple::DataProducingNode};
+use crate::{setup::{DataType, Request}, simple::DataProducingNode};
 
 // The diffs are every dirty since the data was made. A dirty without a diff ends the run.
 // The storage owns the data. The node that applied the diffs becomes its source and the earlier

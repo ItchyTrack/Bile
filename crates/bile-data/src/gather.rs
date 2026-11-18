@@ -7,9 +7,7 @@ use bevy::{
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{
-	dyn_system_params::downcast,
-	setup::{BileDataSchedule, BileDataSystemSet, DirtyState, Request, StateTick},
-	streaming::{DataConsumingNodes, DataRequestingAPI, DataStorage, StreamId, StreamingDataType},
+	dyn_system_params::downcast, setup::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}, streaming::{DataConsumingNodes, DataRequestingAPI, DataStorage, StreamId},
 };
 
 // Gather Producing
@@ -17,7 +15,7 @@ use crate::{
 // Every node is requested and streams only its own resposibility.
 // (Only the gather step. This does not manage ownership transfer)
 #[bevy_trait_query::queryable]
-pub trait DataProducingNode<DT: StreamingDataType> {
+pub trait DataProducingNode<DT: DataType> {
 	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node has no data for the request
 	fn request(&mut self, request: Request<DT>, stream_id: StreamId);
 	fn drop(&mut self, params: &DT::Params);
@@ -32,7 +30,7 @@ type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataPr
 /// still uses it or waits for it, so that late requesters get the replay and a
 /// staler stream is rejected. The cancel of its last user releases it and drops
 /// its sources.
-struct StreamState<DT: StreamingDataType> {
+struct StreamState<DT: DataType> {
 	stream_id: StreamId,
 	sources: HashSet<Entity>,
 	dirty_state: DirtyState,
@@ -41,14 +39,14 @@ struct StreamState<DT: StreamingDataType> {
 	live: HashSet<Entity>,
 }
 
-enum StreamEvent<DT: StreamingDataType> {
+enum StreamEvent<DT: DataType> {
 	Start { entities: HashSet<Entity> },
 	Push { entities: HashSet<Entity>, data: DT::Data },
 	Finish { entities: HashSet<Entity> },
 }
 
 #[derive(Resource)]
-pub struct DataColumn<DT: StreamingDataType> {
+pub struct DataColumn<DT: DataType> {
 	requested: HashMap<DT::Params, (StreamId, HashSet<Entity>)>, // the newest request and its nodes
 	streams: HashMap<DT::Params, StreamState<DT>>,
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>,
@@ -58,7 +56,7 @@ pub struct DataColumn<DT: StreamingDataType> {
 	events: Vec<(DT::Params, StreamEvent<DT>)>,
 }
 
-impl<DT: StreamingDataType> Default for DataColumn<DT> {
+impl<DT: DataType> Default for DataColumn<DT> {
 	fn default() -> Self {
 		Self {
 			requested: HashMap::default(),
@@ -70,7 +68,7 @@ impl<DT: StreamingDataType> Default for DataColumn<DT> {
 	}
 }
 
-impl<DT: StreamingDataType> DataRequestingAPI<DT> for DataColumn<DT> {
+impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
 	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<DataProducingNodes<DT>>(ParamBuilder) }
 	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
 		let data_producing_node: DataProducingNodes<DT> = downcast(dyn_system_params);
@@ -125,7 +123,7 @@ impl<DT: StreamingDataType> DataRequestingAPI<DT> for DataColumn<DT> {
 	}
 }
 
-impl<DT: StreamingDataType> DataStorage<DT> for DataColumn<DT> {
+impl<DT: DataType> DataStorage<DT> for DataColumn<DT> {
 	fn start(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId, dirty_state: DirtyState) {
 		if let Some(stream) = self.streams.get_mut(params) && stream.stream_id == stream_id {
 			// another node joins the stream, which is only as fresh as its least fresh part
@@ -207,7 +205,7 @@ impl<DT: StreamingDataType> DataStorage<DT> for DataColumn<DT> {
 	fn drop_data(&mut self) -> HashMap<DT::Params, HashSet<Entity>> { HashMap::default() }
 }
 
-pub fn pass_data<DT: StreamingDataType>(
+pub fn pass_data<DT: DataType>(
 	bile_state_tick: Res<StateTick>,
 	mut data_column: ResMut<DataColumn<DT>>,
 	mut data_consuming_nodes: DataConsumingNodes<DT>,
@@ -242,7 +240,7 @@ pub fn pass_data<DT: StreamingDataType>(
 	}
 }
 
-pub fn drop_data<DT: StreamingDataType>(
+pub fn drop_data<DT: DataType>(
 	mut data_column: ResMut<DataColumn<DT>>,
 	mut data_producing_nodes: Query<One<&'static mut dyn DataProducingNode<DT>>>,
 ) {
@@ -256,7 +254,7 @@ pub fn drop_data<DT: StreamingDataType>(
 	}
 }
 
-fn setup_bevy_resources<DT: StreamingDataType>(app: &mut App) {
+fn setup_bevy_resources<DT: DataType>(app: &mut App) {
 	if app.world().contains_resource::<DataColumn<DT>>() { return; }
 	app
 		.add_systems(BileDataSchedule, (
@@ -270,12 +268,12 @@ fn setup_bevy_resources<DT: StreamingDataType>(app: &mut App) {
 
 pub trait BileRegisterGather {
 	fn register_producer_gather<DT, C>(&mut self) -> &mut Self
-	where DT: StreamingDataType, C: Component + DataProducingNode<DT>;
+	where DT: DataType, C: Component + DataProducingNode<DT>;
 }
 
 impl BileRegisterGather for App {
 	fn register_producer_gather<DT, C>(&mut self) -> &mut Self
-	where DT: StreamingDataType, C: Component + DataProducingNode<DT>,
+	where DT: DataType, C: Component + DataProducingNode<DT>,
 	{
 		self.register_component_as::<dyn DataProducingNode<DT>, C>();
 		setup_bevy_resources::<DT>(self);

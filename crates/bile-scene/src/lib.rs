@@ -4,7 +4,7 @@ mod bounds;
 pub use node::SceneNode;
 pub use bounds::NodeBounds;
 
-// The idea for bile scenes is simple. Add a bile datastreaming node that impls StreamingDataType
+// The idea for bile scenes is simple. Add a bile datastreaming node that impls DataType
 // with the DataType being (data being a scene node bounds and params being the scene node id)
 // and the params being the parent node id. This node adds the children as they come in as child
 // entities to the parent. This allows a request for the nodes within a scene node. Then also we
