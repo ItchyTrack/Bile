@@ -377,3 +377,89 @@ fn gather_replacing_a_live_stream_does_not_drop_its_nodes() {
 	assert!(app.world().get::<GatherProducer>(x).unwrap().1.is_empty());
 	assert!(app.world().get::<GatherProducer>(y).unwrap().1.is_empty());
 }
+
+#[test]
+fn gather_cancelled_before_any_start_drops_the_requested_nodes() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_gather::<Parts, GatherProducer>().register_consumer_streaming::<Parts, Consumer>();
+	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
+	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
+	let z = app.world_mut().spawn(GatherProducer(vec![], vec![], None)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	let (_, old_id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, old_id)]);
+	// the only requester cancels while no node has started yet, the nodes that were asked are told to stop
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
+	assert!(app.world().get::<GatherProducer>(z).unwrap().1.is_empty());
+	// a new request reaches them again with a new stream, which works
+	request_parts(&mut app, a);
+	let requests = app.world().get::<GatherProducer>(x).unwrap().0.clone();
+	assert_eq!(requests.len(), 2);
+	let id = requests[1].1;
+	assert_ne!(id, old_id);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, requests);
+	assert!(app.world().get::<GatherProducer>(z).unwrap().0.is_empty());
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(y, &3, old_id, DirtyState::UpToDate); // of the cancelled request
+			passer.start(x, &3, id, DirtyState::UpToDate);
+			passer.start(y, &3, id, DirtyState::UpToDate);
+			passer.push(x, &3, id, 10);
+			passer.push(y, &3, id, 20);
+			passer.finish(x, &3, id);
+			passer.finish(y, &3, id);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
+	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
+}
+
+#[test]
+fn gather_cancelled_before_the_replacing_stream_starts_drops_its_nodes_too() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_gather::<Parts, GatherProducer>().register_consumer_streaming::<Parts, Consumer>();
+	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
+	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], None)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	let (_, old_id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
+	assert!(app.world().get::<GatherProducer>(y).unwrap().0.is_empty());
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(x, &3, old_id, DirtyState::UpToDate);
+			passer.push(x, &3, old_id, 10);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10"]);
+	// the data is dirtied and requested again, now y has something for it too
+	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
+	app.world_mut().get_mut::<GatherProducer>(y).unwrap().2 = Some(2.0);
+	request_parts(&mut app, a);
+	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[1];
+	assert_ne!(id, old_id);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, id)]);
+	// the only requester cancels before the new stream starts: x is a node of the old stream, y only of the new request
+	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
+	// nothing of the cancelled request is accepted afterwards
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(y, &3, id, DirtyState::UpToDate);
+			passer.push(y, &3, id, 20);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "dirty 3"]);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
+}

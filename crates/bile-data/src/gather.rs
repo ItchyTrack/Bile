@@ -113,14 +113,19 @@ impl<SDT: StreamingDataType> DataRequestingAPI<SDT> for DataColumn<SDT> {
 		}
 
 		let Some(stream) = self.streams.get_mut(params) else {
-			if !self.waiting.contains_key(params) { self.requested.remove(params); }
+			if !self.waiting.contains_key(params) && let Some((_, sources)) = self.requested.remove(params) {
+				// no node started yet, but all of them were asked and have to be told to stop
+				self.data_to_drop.entry(params.clone()).or_default().extend(sources);
+			}
 			return;
 		};
 		stream.usages.remove(&requester_node);
 		if stream.usages.is_empty() && !self.waiting.contains_key(params) {
-			self.data_to_drop.entry(params.clone()).or_default().extend(std::mem::take(&mut stream.sources));
+			let data_to_drop = self.data_to_drop.entry(params.clone()).or_default();
+			data_to_drop.extend(std::mem::take(&mut stream.sources));
+			// a newer request that did not start yet may have asked nodes that are not part of the stream
+			data_to_drop.extend(self.requested.remove(params).into_iter().flat_map(|requested| requested.1));
 			self.streams.remove(params);
-			self.requested.remove(params);
 		}
 	}
 }
