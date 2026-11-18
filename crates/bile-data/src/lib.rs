@@ -9,7 +9,7 @@ use bevy::prelude::*;
 
 use crate::{setup::BileDataDefaultPlugin};
 
-pub use setup::{StateTick, DirtyState, BileDataSchedule, BileDataSystemSet};
+pub use setup::{StateTick, Request, DirtyState, DataType, BileDataSchedule, BileDataSystemSet};
 
 #[derive(Default)]
 pub struct BileDataPlugin;

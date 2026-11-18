@@ -1,6 +1,6 @@
 use bevy::ecs::system::RunSystemOnce;
 
-use crate::{diff::BileRegisterDiff, gather::BileRegisterGather, simple::{self, BileRegisterSimple}, streaming::{self, BileRegisterStreaming, DataType}, *};
+use crate::{diff::BileRegisterDiff, gather::BileRegisterGather, setup::{DataType, Request}, simple::{self, BileRegisterSimple}, streaming::{self, BileRegisterStreaming}, *};
 
 struct Parts;
 impl DataType for Parts {
@@ -21,22 +21,22 @@ impl streaming::DataConsumingNode<Parts> for Consumer {
 #[derive(Component, Default)]
 struct StreamProducer(Vec<(u32, streaming::StreamId)>, Vec<u32>, Option<f32>);
 impl streaming::DataProducingNode<Parts> for StreamProducer {
-	fn cost(&self, _request: &streaming::Request<Parts>) -> Option<f32> { self.2 }
-	fn request(&mut self, request: streaming::Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
+	fn cost(&self, _request: &Request<Parts>) -> Option<f32> { self.2 }
+	fn request(&mut self, request: Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
 	fn drop(&mut self, params: &u32) { self.1.push(*params); }
 }
 
 #[derive(Component, Default)]
 struct GatherProducer(Vec<(u32, streaming::StreamId)>, Vec<u32>, Option<f32>);
 impl gather::DataProducingNode<Parts> for GatherProducer {
-	fn cost(&self, _request: &streaming::Request<Parts>) -> Option<f32> { self.2 }
-	fn request(&mut self, request: streaming::Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
+	fn cost(&self, _request: &Request<Parts>) -> Option<f32> { self.2 }
+	fn request(&mut self, request: Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
 	fn drop(&mut self, params: &u32) { self.1.push(*params); }
 }
 
 fn request_parts(app: &mut App, entity: Entity) {
 	app.world_mut()
-		.run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.request(streaming::Request { params: 3, allowed_tick: DirtyState::UpToDate }, entity))
+		.run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.request(Request { params: 3, allowed_tick: DirtyState::UpToDate }, entity))
 		.unwrap();
 }
 
