@@ -8,6 +8,8 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::{dyn_system_params::{DynSystemParams, HasDynSystemParam, downcast}, setup::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}};
 
+// ============================ Consuming ============================
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
 
@@ -75,6 +77,8 @@ impl<'w, 's, DT: DataType> DataRequester<'w, 's, DT> {
 	}
 }
 
+// ============================ Producing ============================
+
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<DT: DataType> {
 	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request
@@ -82,7 +86,7 @@ pub trait DataProducingNode<DT: DataType> {
 	fn drop(&mut self, params: &DT::Params);
 }
 
-type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>;
+pub type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>;
 pub type DataConsumingNodes<'w, 's, DT> = Query<'w, 's, One<&'static mut dyn DataConsumingNode<DT>>>;
 
 // None if no node can fulfill the request
@@ -108,6 +112,8 @@ pub trait DataStorage<DT: DataType> {
 	fn uses(&self, params: &DT::Params, source_entity: Entity) -> bool; // a node is only dropped when no storage uses it
 	fn drop_data(&mut self) -> HashMap<DT::Params, HashSet<Entity>>; // the nodes this storage no longer uses
 }
+
+// ============================ Data Storage ============================
 
 /// Tracks whichever stream is currently accepted for a given `params`. After
 /// `finish` (with `live = false`) it is kept only while something still uses it
