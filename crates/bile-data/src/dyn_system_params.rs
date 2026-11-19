@@ -64,7 +64,8 @@ impl<K: ?Sized + 'static> DynSystemParams<'_, '_, K> {
 	}
 }
 
-// SAFETY: Delegates to the params of every registered type, `init_access` registers the access of all of them.
+// SAFETY: Delegates to the params of every registered type, `init_access` registers the access of all of them and
+// checks each against the other params of the system. `get` borrows mutably, so they are never used at the same time.
 unsafe impl<K: ?Sized + 'static> SystemParam for DynSystemParams<'_, '_, K> {
 	type State = DynSystemParamsState;
 	type Item<'w, 's> = DynSystemParams<'w, 's, K>;
@@ -73,9 +74,16 @@ unsafe impl<K: ?Sized + 'static> SystemParam for DynSystemParams<'_, '_, K> {
 		let inits = world.get_resource::<DynParamRegistry<K>>().map(|registry| registry.inits.clone()).unwrap_or_default();
 		DynSystemParamsState(inits.into_iter().map(|(type_id, init)| (type_id, init(world))).collect())
 	}
+	// Like a `ParamSet`, only one of the params is used at a time. So each of them can conflict with the other params of
+	// the system, but not with each other.
 	fn init_access(state: &Self::State, system_meta: &mut SystemMeta, system_access: &mut SystemAccess, world: &mut World) {
 		for (_, state) in &state.0 {
-			state.init_access(system_meta, system_access, world);
+			state.init_access(system_meta, &mut system_access.clone(), world);
+		}
+		for (_, state) in &state.0 {
+			let mut param_access = SystemAccess::default();
+			state.init_access(system_meta, &mut param_access, world);
+			system_access.extend(param_access);
 		}
 	}
 	fn apply(state: &mut Self::State, system_meta: &SystemMeta, world: &mut World) {

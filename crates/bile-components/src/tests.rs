@@ -216,3 +216,18 @@ fn nodes_share_the_data_with_the_components() {
 	app.update();
 	assert_eq!(app.world().get::<Producer>(producer).unwrap().drops, vec![3]);
 }
+
+#[test]
+fn component_data_can_be_added_after_its_nodes() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_simple::<Num, Producer>().add_component_data::<Num>();
+	let producer = app.world_mut().spawn(Producer::default()).id();
+	let entity = app.world_mut().spawn_empty().id();
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	app.update();
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().requests, vec![3]);
+	pass(&mut app, producer, 3, Some(Value(30)));
+	app.update();
+	assert_eq!(app.world().get::<Value>(entity), Some(&Value(30)));
+}

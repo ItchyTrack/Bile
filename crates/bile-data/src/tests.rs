@@ -249,7 +249,7 @@ fn dirtying_updates_the_state_tick() {
 }
 
 #[test]
-fn gather_replaces_the_default_streaming_parts() {
+fn gather_does_not_depend_on_the_registration_order() {
 	let mut app = App::new();
 	app.add_plugins(BileDataPlugin);
 	app.register_consumer_streaming::<Parts, Consumer>().register_producer_gather::<Parts, GatherProducer>();
@@ -259,6 +259,53 @@ fn gather_replaces_the_default_streaming_parts() {
 	request_parts(&mut app, a);
 	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().0.len(), 1);
 	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0.len(), 1);
+}
+
+#[test]
+fn the_cheapest_fulfiller_streams() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_producer_streaming::<Parts, StreamProducer>()
+		.register_producer_gather::<Parts, GatherProducer>()
+		.register_consumer_streaming::<Parts, Consumer>();
+	let producer = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(2.0))).id();
+	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
+	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.5))).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	// the gather costs as much as its most expensive node
+	request_parts(&mut app, a);
+	assert!(app.world().get::<StreamProducer>(producer).unwrap().0.is_empty());
+	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, id)]);
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(x, &3, id, DirtyState::UpToDate);
+			passer.start(y, &3, id, DirtyState::UpToDate);
+			passer.push(x, &3, id, 10);
+			passer.finish(x, &3, id);
+			passer.finish(y, &3, id);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3"]);
+	// the gather got more expensive, so the stream producer streams the new data and the gather nodes are dropped
+	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
+	app.world_mut().get_mut::<GatherProducer>(y).unwrap().2 = Some(5.0);
+	request_parts(&mut app, a);
+	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().0.len(), 1);
+	let (_, id) = app.world().get::<StreamProducer>(producer).unwrap().0[0];
+	app.world_mut()
+		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
+			passer.start(producer, &3, id, DirtyState::UpToDate);
+			passer.push(producer, &3, id, 20);
+			passer.finish(producer, &3, id);
+		})
+		.unwrap();
+	app.update();
+	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3", "dirty 3", "start 3", "push 3 20", "finish 3"]);
+	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
+	assert!(app.world().get::<StreamProducer>(producer).unwrap().1.is_empty());
 }
 
 #[test]

@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use crate::{setup::BileDataDefaultPlugin};
 
 pub use setup::{StateTick, Request, DirtyState, DataType, BileDataSchedule, BileDataSystemSet};
-pub use parts::{DataParts, Part, SetupParts, BileSetDataParts};
+pub use parts::{BileDataParts, DataPart, DataStorage, Part, Storage};
 
 #[derive(Default)]
 pub struct BileDataPlugin;
