@@ -148,6 +148,33 @@ pub fn drop_data<DT: DataType>(
 }
 
 // ============================ Data Storage ============================
+// I dont know how to do data storage yet.
+// My goal is to allow somefome of modding to it but I dont know how to make them work together.
+// Heres a example: bile-components stores data on entities, we would alow want to allow the default
+// simple data path where you can request from another node and it gets passed around. The issue is
+// that you dont want to store 2 copies of the data and so we want to use the components if its
+// already placed and we want to move it to and from the components when the wanted components
+// changes. This is hard because it changes the simple behavoir significantly.
+// One way to continue is to remove the API (kinda) and instead of moddableity we could make each
+// "modded" version be written from scratch. One full impl with and without components. This may be
+// the best from removing limits but it hurts by making all the diffrent mods couple together with a
+// particular impl, if you wanted to change how simple works internaly you would break other crates.
+// Another way is kinda like a single impl but instead having a bunch of types and procedures that
+// can be combined together to create a impl of a DataStorage.
+
+// I think that a bunch of impls may work. Heres the idea:
+// There are 3 parts of `RequestManager`: `Requester`, `Storage`, and `Fulfiller`.
+// The vision is that implmentations `Requester` and `Fulfiller` define a trait that 'Storage' must
+// impl. For example we can have `SimpleRequester` which needs to request get single pieces of data.
+// Then we can have "SimpleStorage", just regulare storage, and `ComponentStorage` which impls the
+// system with swaping and stuff. `ComponentStorage` would also impl a trait `SimpleFulfiller` would
+// define and a trait `ComponentRequester`, which does not provide to a node but is something that
+// requests from the storage based on Want<T>.
+// This means we dont need DataRequestingAPI anymore but instead need to just be able to set one per
+// DataType. We would still need to be able to replace parts of it later on but thats ok. I want to
+// do it throught generics so that `Requester` and `Fulfiller` are generic over `Storage`.
+
+
 pub struct DataInfo<DT: DataType> {
 	pub dirty_state: DirtyState,
 	pub data: Option<DT::Data>,
