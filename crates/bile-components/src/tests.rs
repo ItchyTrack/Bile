@@ -174,3 +174,45 @@ fn diffs_are_applied_to_the_component() {
 	assert_eq!(app.world().get::<Producer>(producer).unwrap().requests, vec![3, 3]);
 	assert!(app.world().get::<Producer>(producer).unwrap().drops.is_empty());
 }
+
+#[derive(Component, Default)]
+struct Consumer(Vec<Option<Value>>);
+
+impl simple::DataConsumingNode<Num> for Consumer {
+	fn pass_data(&mut self, _params: &u32, _tick: u64, data: Option<Value>) { self.0.push(data); }
+	fn dirty_data(&mut self, _params: &u32, _tick: u64, _diff: Option<&u32>) {}
+}
+
+fn request(app: &mut App, consumer: Entity) -> Option<Option<Value>> {
+	app.world_mut().run_system_once(move |mut requester: simple::DataRequester<Num>| requester.request(Request::new(3, DirtyState::UpToDate), consumer)).unwrap()
+}
+
+#[test]
+fn nodes_share_the_data_with_the_components() {
+	let (mut app, producer, entity) = setup();
+	app.register_consumer_simple::<Num, Consumer>();
+	let consumer = app.world_mut().spawn(Consumer::default()).id();
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	app.update();
+	pass(&mut app, producer, 3, Some(Value(30)));
+	app.update();
+	// a node gets the data from the component
+	assert_eq!(request(&mut app, consumer), Some(Some(Value(30))));
+	// the last want takes the data out of its component, the node still uses it
+	unwant::<Num>(&mut app.world_mut().entity_mut(entity));
+	app.update();
+	assert!(app.world().get::<Value>(entity).is_none());
+	let other = app.world_mut().spawn(Consumer::default()).id();
+	assert_eq!(request(&mut app, other), Some(Some(Value(30))));
+	// wanted again, it is moved back into a component
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	app.update();
+	assert_eq!(app.world().get::<Value>(entity), Some(&Value(30)));
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().requests, vec![3]);
+	assert!(app.world().get::<Producer>(producer).unwrap().drops.is_empty());
+	// dropped when nothing uses it anymore
+	app.world_mut().run_system_once(move |mut requester: simple::DataRequester<Num>| { requester.cancel(&3, consumer); requester.cancel(&3, other); }).unwrap();
+	unwant::<Num>(&mut app.world_mut().entity_mut(entity));
+	app.update();
+	assert_eq!(app.world().get::<Producer>(producer).unwrap().drops, vec![3]);
+}

@@ -1,4 +1,5 @@
 pub mod setup;
+pub mod parts;
 pub mod diff;
 pub mod dyn_system_params;
 pub mod gather;
@@ -10,6 +11,7 @@ use bevy::prelude::*;
 use crate::{setup::BileDataDefaultPlugin};
 
 pub use setup::{StateTick, Request, DirtyState, DataType, BileDataSchedule, BileDataSystemSet};
+pub use parts::{DataParts, Part, SetupParts, BileSetDataParts};
 
 #[derive(Default)]
 pub struct BileDataPlugin;

@@ -1,19 +1,20 @@
 use std::collections::{HashMap, HashSet};
 
-use bevy::{
-	ecs::system::{DynParamBuilder, DynSystemParam, ParamBuilder},
-	prelude::*,
-};
+use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{
-	dyn_system_params::downcast, setup::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick}, streaming::{DataConsumingNodes, DataRequestingAPI, DataStorage, StreamId},
+	parts::{BileSetDataParts, Part},
+	setup::{DataType, DirtyState, Request},
+	streaming::{Fulfiller, Stream, StreamId, StreamRequester, StreamRequesterStorage, StreamRequests},
 };
 
-// Gather Producing
+// A gather is a stream that every node with data for the request is part of. The nodes are requested together and
+// each streams only its own responsibility (only the gather step, this does not manage ownership transfer).
+// It is streamed to the nodes by the stream requester.
 
-// Every node is requested and streams only its own resposibility.
-// (Only the gather step. This does not manage ownership transfer)
+// ============================ Nodes ============================
+
 #[bevy_trait_query::queryable]
 pub trait DataProducingNode<DT: DataType> {
 	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node has no data for the request
@@ -21,250 +22,156 @@ pub trait DataProducingNode<DT: DataType> {
 	fn drop(&mut self, params: &DT::Params);
 }
 
-type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>;
+pub type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>;
 
-// Gather Producing Data
+// ============================ Gather Fulfiller ============================
 
-/// Tracks whichever stream is currently accepted for a given `params`. After
-/// every source finished (with `live` empty) it is kept only while something
-/// still uses it or waits for it, so that late requesters get the replay and a
-/// staler stream is rejected. The cancel of its last user releases it and drops
-/// its sources.
-struct StreamState<DT: DataType> {
-	stream_id: StreamId,
-	sources: HashSet<Entity>,
-	dirty_state: DirtyState,
-	usages: HashSet<Entity>,
-	data: Vec<DT::Data>,
-	live: HashSet<Entity>,
+/// What the gather fulfiller needs from a storage.
+pub trait GatherFulfillerStorage<DT: DataType>: Part {
+	fn stream(&self, params: &DT::Params) -> Option<&Stream<DT>>;
+	fn stream_mut(&mut self, params: &DT::Params) -> Option<&mut Stream<DT>>;
+	/// Replaces the stream that was accepted, live or not.
+	fn start(&mut self, params: &DT::Params, stream: Stream<DT>);
+	fn sources(&mut self) -> &mut GatherSources<DT>;
+	/// Something waits for the stream, so it is accepted when it starts.
+	fn wanted(&self, params: &DT::Params) -> bool;
+	/// A stream that satisfies `allowed_tick` is already on its way.
+	fn is_requested(&self, params: &DT::Params, allowed_tick: &DirtyState) -> bool;
 }
 
-enum StreamEvent<DT: DataType> {
-	Start { entities: HashSet<Entity> },
-	Push { entities: HashSet<Entity>, data: DT::Data },
-	Finish { entities: HashSet<Entity> },
-}
-
-#[derive(Resource)]
-pub struct DataColumn<DT: DataType> {
+/// What the gather fulfiller keeps in the storage: the nodes the streams come from.
+pub struct GatherSources<DT: DataType> {
 	requested: HashMap<DT::Params, (StreamId, HashSet<Entity>)>, // the newest request and its nodes
-	streams: HashMap<DT::Params, StreamState<DT>>,
+	sources: HashMap<DT::Params, HashSet<Entity>>,               // the nodes of the accepted stream
+	live: HashMap<DT::Params, HashSet<Entity>>,                  // the nodes of the accepted stream that did not finish
 	data_to_drop: HashMap<DT::Params, HashSet<Entity>>,
-	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
-	// Ordered (unlike the other modules' HashMap-based `finished`) because
-	// start/push.../finish must be delivered to consumers in that order.
-	events: Vec<(DT::Params, StreamEvent<DT>)>,
 }
 
-impl<DT: DataType> Default for DataColumn<DT> {
-	fn default() -> Self {
-		Self {
-			requested: HashMap::default(),
-			streams: HashMap::default(),
-			data_to_drop: HashMap::default(),
-			waiting: HashMap::default(),
-			events: Vec::default(),
-		}
-	}
+impl<DT: DataType> Default for GatherSources<DT> {
+	fn default() -> Self { Self { requested: HashMap::default(), sources: HashMap::default(), live: HashMap::default(), data_to_drop: HashMap::default() } }
 }
 
-impl<DT: DataType> DataRequestingAPI<DT> for DataColumn<DT> {
-	fn dyn_system_param(&self) -> DynParamBuilder<'static> { DynParamBuilder::new::<DataProducingNodes<DT>>(ParamBuilder) }
-	fn cost(&self, dyn_system_params: &mut [DynSystemParam], request: &Request<DT>) -> Option<f32> {
-		let data_producing_node: DataProducingNodes<DT> = downcast(dyn_system_params);
-		data_producing_node.iter().filter_map(|(node, _)| node.cost(request)).reduce(|a, b| a + b)
-	}
-	fn request(&mut self, dyn_system_params: &mut [DynSystemParam], request: Request<DT>, requester_node: Entity) {
-		if let Some(stream) = self.streams.get_mut(&request.params) && stream.dirty_state.satisfies(&request.allowed_tick) {
-			stream.usages.insert(requester_node);
-			let entities = HashSet::from([requester_node]);
-			self.events.push((request.params.clone(), StreamEvent::Start { entities: entities.clone() }));
-			self.events.extend(stream.data.iter().map(|data| (request.params.clone(), StreamEvent::Push { entities: entities.clone(), data: data.clone() })));
-			if stream.live.is_empty() {
-				self.events.push((request.params, StreamEvent::Finish { entities }));
-			}
-			return;
+impl<DT: DataType> GatherSources<DT> {
+	/// Nothing uses or waits for the stream anymore, so the nodes it came from are dropped.
+	pub fn release(&mut self, params: &DT::Params) {
+		self.requested.remove(params);
+		self.live.remove(params);
+		if let Some(sources) = self.sources.remove(params) {
+			self.data_to_drop.entry(params.clone()).or_default().extend(sources);
 		}
-		let already_requested = self.waiting.get(&request.params).is_some_and(|waiting| waiting.values().any(|required| required.satisfies(&request.allowed_tick)));
-		// update requester
-		self.waiting.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
-		if already_requested { return; }
-		let mut data_producing_node: DataProducingNodes<DT> = downcast(dyn_system_params);
-		let sources: HashSet<Entity> = data_producing_node.iter().filter_map(|(node, entity)| node.cost(&request).and(Some(entity))).collect();
-		// issue a fresh stream id and kick off the stream
+	}
+	fn is_live(&self, params: &DT::Params, source_entity: Entity) -> bool { self.live.get(params).is_some_and(|live| live.contains(&source_entity)) }
+}
+
+/// Has every node with data for the request stream its part.
+#[derive(Default)]
+pub struct GatherFulfiller;
+
+impl<DT: DataType, S: GatherFulfillerStorage<DT>> Fulfiller<DT, S> for GatherFulfiller {
+	type Param = DataProducingNodes<'static, 'static, DT>;
+
+	fn fulfill(&mut self, storage: &mut S, nodes: &mut DataProducingNodes<DT>, request: Request<DT>) {
+		if storage.is_requested(&request.params, &request.allowed_tick) { return; }
+		let node_entities: HashSet<Entity> = nodes.iter().filter_map(|(node, entity)| node.cost(&request).and(Some(entity))).collect();
 		let stream_id = StreamId::new();
-		for &node_entity in &sources {
-			if let Some(dropped) = self.data_to_drop.get_mut(&request.params) {
+		let sources = storage.sources();
+		for &node_entity in &node_entities {
+			if let Some(dropped) = sources.data_to_drop.get_mut(&request.params) {
 				dropped.remove(&node_entity);
 			}
-			let mut node = data_producing_node.get_mut(node_entity).expect("This must exist as it was found by its cost").0;
-			node.request(Request { params: request.params.clone(), allowed_tick: request.allowed_tick }, stream_id);
+			let mut node = nodes.get_mut(node_entity).expect("This must exist as it was found by its cost").0;
+			node.request(Request::new(request.params.clone(), request.allowed_tick), stream_id);
 		}
-		self.requested.insert(request.params, (stream_id, sources));
+		sources.requested.insert(request.params, (stream_id, node_entities));
 	}
-	fn cancel(&mut self, _dyn_system_params: &mut [DynSystemParam], params: &DT::Params, requester_node: Entity) {
-		if let Some(waiting) = self.waiting.get_mut(params) {
-			waiting.remove(&requester_node);
-			if waiting.is_empty() {
-				self.waiting.remove(params);
-			}
-		}
-
-		let Some(stream) = self.streams.get_mut(params) else {
-			if !self.waiting.contains_key(params) { self.requested.remove(params); }
-			return;
-		};
-		stream.usages.remove(&requester_node);
-		if stream.usages.is_empty() && !self.waiting.contains_key(params) {
-			self.data_to_drop.entry(params.clone()).or_default().extend(std::mem::take(&mut stream.sources));
-			self.streams.remove(params);
-			self.requested.remove(params);
-		}
-	}
-}
-
-impl<DT: DataType> DataStorage<DT> for DataColumn<DT> {
-	fn start(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId, dirty_state: DirtyState) {
-		if let Some(stream) = self.streams.get_mut(params) && stream.stream_id == stream_id {
+	fn start(&mut self, storage: &mut S, source_entity: Entity, params: &DT::Params, stream_id: StreamId, dirty_state: DirtyState) -> bool {
+		if let Some(stream) = storage.stream_mut(params) && stream.stream_id == stream_id {
 			// another node joins the stream, which is only as fresh as its least fresh part
 			if stream.dirty_state.is_fresher_than(&dirty_state) {
 				stream.dirty_state = dirty_state;
 			}
-			return;
+			return false;
 		}
-
-		let Some(sources) = self.requested.get(params).filter(|requested| requested.0 == stream_id).map(|requested| requested.1.clone()) else { return; }; // the stream of another storage
-		if let Some(existing) = self.streams.get(params) && existing.dirty_state.is_fresher_than(&dirty_state) {
-			// something fresher is already active or already finished here; reject outright
-			self.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
-			return;
+		let Some((_, node_entities)) = storage.sources().requested.get(params).filter(|(requested, _)| *requested == stream_id).cloned() else { return false; }; // not the newest stream
+		// something fresher is already active or already finished here, or no one wants this anymore
+		if storage.stream(params).is_some_and(|existing| existing.dirty_state.is_fresher_than(&dirty_state)) || !storage.wanted(params) {
+			storage.sources().data_to_drop.entry(params.clone()).or_default().insert(source_entity);
+			return false;
 		}
-
-		let Some(waiting) = self.waiting.remove(params) else {
-			self.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
-			return; /* No one wants this anymore */
-		};
-
-		if let Some(old) = self.streams.remove(params) {
-			// supersede whatever was there, live or not; the nodes that are not part of the new stream are told to stop.
-			// The others replaced their old work when they got the new request, a drop would stop the new stream too.
-			let old_sources = old.sources.into_iter().filter(|old_source| !sources.contains(old_source));
-			self.data_to_drop.entry(params.clone()).or_default().extend(old_sources);
+		// supersede whatever was there, live or not; the nodes that are not part of the new stream are told to stop.
+		// The others replaced their old work when they got the new request, a drop would stop the new stream too.
+		let sources = storage.sources();
+		if let Some(old_sources) = sources.sources.remove(params) {
+			sources.data_to_drop.entry(params.clone()).or_default().extend(old_sources.difference(&node_entities));
 		}
-
-		let mut usages = HashSet::default();
-		let mut still_waiting = HashMap::default();
-		for (entity, required) in waiting {
-			if dirty_state.satisfies(&required) {
-				usages.insert(entity);
-			} else {
-				still_waiting.insert(entity, required);
-			}
-		}
-		if !still_waiting.is_empty() {
-			self.waiting.insert(params.clone(), still_waiting);
-		}
-		if !usages.is_empty() {
-			self.events.push((params.clone(), StreamEvent::Start { entities: usages.clone() }));
-		}
-
-		self.streams.insert(params.clone(), StreamState { stream_id, live: sources.clone(), sources, dirty_state, usages, data: Vec::new() });
+		sources.live.insert(params.clone(), node_entities.clone());
+		sources.sources.insert(params.clone(), node_entities);
+		storage.start(params, Stream::new(stream_id, dirty_state));
+		true
 	}
-	fn push(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId, data: &DT::Data) {
-		let Some(stream) = self.streams.get_mut(params) else { return; };
-		if stream.stream_id != stream_id || !stream.live.contains(&source_entity) { return; } // stale stream, ignore
+	fn push(&mut self, storage: &mut S, source_entity: Entity, params: &DT::Params, stream_id: StreamId, data: &DT::Data) -> bool {
+		if !storage.sources().is_live(params, source_entity) { return false; } // stale stream, ignore
+		let Some(stream) = storage.stream_mut(params).filter(|stream| stream.stream_id == stream_id) else { return false; };
 		stream.data.push(data.clone());
-		if stream.usages.is_empty() { return; }
-		let usages = stream.usages.clone();
-		self.events.push((params.clone(), StreamEvent::Push { entities: usages, data: data.clone() }));
+		true
 	}
-	fn finish(&mut self, source_entity: Entity, params: &DT::Params, stream_id: StreamId) {
-		let Some(stream) = self.streams.get_mut(params) else { return; };
-		if stream.stream_id != stream_id || !stream.live.contains(&source_entity) { return; } // stale stream, ignore
-		stream.live.remove(&source_entity);
-		if !stream.live.is_empty() { return; }
-		let entities = stream.usages.clone();
-		if !entities.is_empty() {
-			self.events.push((params.clone(), StreamEvent::Finish { entities }));
+	fn finish(&mut self, storage: &mut S, source_entity: Entity, params: &DT::Params, stream_id: StreamId) -> bool {
+		if !storage.sources().is_live(params, source_entity) || !storage.stream(params).is_some_and(|stream| stream.stream_id == stream_id) { return false; } // stale stream, ignore
+		let live = storage.sources().live.get_mut(params).expect("The node is live");
+		live.remove(&source_entity);
+		if !live.is_empty() { return false; }
+		storage.stream_mut(params).expect("The stream is live").finished = true;
+		true
+	}
+	fn mark_dirty(&mut self, storage: &mut S, params: &DT::Params, last_clean_tick: u64) {
+		if let Some(stream) = storage.stream_mut(params) {
+			stream.dirty_state = DirtyState::Dirty { tick: last_clean_tick };
 		}
 	}
-	fn dirty_data(&mut self, data_consuming_nodes: &mut DataConsumingNodes<DT>, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>) {
-		let Some(stream) = self.streams.get_mut(params) else { return; };
-		stream.dirty_state = DirtyState::Dirty { tick: last_clean_tick };
-		stream.usages.retain(|&usage| {
-			let Ok(mut node) = data_consuming_nodes.get_mut(usage) else {
-				bevy::log::error!(name: "Missing DataConsumingNode", "Usage was not removed for non existent DataConsumingNode {}.", usage);
-				return false;
-			};
-			node.dirty_data(params, last_clean_tick, diff);
-			true
-		})
-	}
-	// The nodes of a gather are not streaming nodes, drop_data here drops them.
-	fn uses(&self, _params: &DT::Params, _source_entity: Entity) -> bool { false }
-	fn drop_data(&mut self) -> HashMap<DT::Params, HashSet<Entity>> { HashMap::default() }
-}
-
-pub fn pass_data<DT: DataType>(
-	bile_state_tick: Res<StateTick>,
-	mut data_column: ResMut<DataColumn<DT>>,
-	mut data_consuming_nodes: DataConsumingNodes<DT>,
-) {
-	if data_column.events.is_empty() { return; }
-
-	for (params, event) in std::mem::take(&mut data_column.events) {
-		match event {
-			StreamEvent::Start { entities } => {
-				let tick = match data_column.streams.get(&params).map(|s| s.dirty_state) {
-					Some(DirtyState::Dirty { tick }) => tick,
-					_ => bile_state_tick.current_tick(),
-				};
-				for entity in entities {
-					let Ok(mut node) = data_consuming_nodes.get_mut(entity) else { continue; };
-					node.start_data(&params, tick);
-				}
-			}
-			StreamEvent::Push { entities, data } => {
-				for entity in entities {
-					let Ok(mut node) = data_consuming_nodes.get_mut(entity) else { continue; };
-					node.push_data(&params, data.clone());
-				}
-			}
-			StreamEvent::Finish { entities } => {
-				for entity in entities {
-					let Ok(mut node) = data_consuming_nodes.get_mut(entity) else { continue; };
-					node.finish_data(&params);
-				}
+	// The nodes of a gather are only dropped when nothing uses their stream anymore or a new stream replaced them.
+	fn drop_data(&mut self, storage: &mut S, nodes: &mut DataProducingNodes<DT>) {
+		if storage.sources().data_to_drop.is_empty() { return; }
+		for (params, sources) in std::mem::take(&mut storage.sources().data_to_drop) {
+			for source_entity in sources {
+				let Ok((mut node, _)) = nodes.get_mut(source_entity) else { continue; };
+				node.drop(&params);
 			}
 		}
 	}
 }
 
-pub fn drop_data<DT: DataType>(
-	mut data_column: ResMut<DataColumn<DT>>,
-	mut data_producing_nodes: Query<One<&'static mut dyn DataProducingNode<DT>>>,
-) {
-	if data_column.data_to_drop.is_empty() { return; }
+// ============================ Gather Storage ============================
 
-	for (params, sources) in std::mem::take(&mut data_column.data_to_drop) {
-		for source_entity in sources {
-			let Ok(mut node) = data_producing_nodes.get_mut(source_entity) else { continue; };
-			node.drop(&params);
-		}
+/// Keeps the accepted gather of every `params`.
+pub struct GatherStorage<DT: DataType> {
+	streams: HashMap<DT::Params, Stream<DT>>,
+	requests: StreamRequests<DT>,
+	sources: GatherSources<DT>,
+}
+
+impl<DT: DataType> Default for GatherStorage<DT> {
+	fn default() -> Self { Self { streams: HashMap::default(), requests: StreamRequests::default(), sources: GatherSources::default() } }
+}
+
+impl<DT: DataType> StreamRequesterStorage<DT> for GatherStorage<DT> {
+	fn stream(&self, params: &DT::Params) -> Option<&Stream<DT>> { self.streams.get(params) }
+	fn requests(&mut self) -> &mut StreamRequests<DT> { &mut self.requests }
+	fn release(&mut self, params: &DT::Params) {
+		self.streams.remove(params);
+		self.sources.release(params);
 	}
 }
 
-fn setup_bevy_resources<DT: DataType>(app: &mut App) {
-	if app.world().contains_resource::<DataColumn<DT>>() { return; }
-	app
-		.add_systems(BileDataSchedule, (
-			pass_data::<DT>.in_set(BileDataSystemSet::PassData),
-			drop_data::<DT>.in_set(BileDataSystemSet::DropData),
-		))
-		.init_resource::<DataColumn<DT>>()
-		.register_component_as::<dyn DataRequestingAPI<DT>, DataColumn<DT>>()
-		.register_component_as::<dyn DataStorage<DT>, DataColumn<DT>>();
+impl<DT: DataType> GatherFulfillerStorage<DT> for GatherStorage<DT> {
+	fn stream(&self, params: &DT::Params) -> Option<&Stream<DT>> { self.streams.get(params) }
+	fn stream_mut(&mut self, params: &DT::Params) -> Option<&mut Stream<DT>> { self.streams.get_mut(params) }
+	fn start(&mut self, params: &DT::Params, stream: Stream<DT>) { self.streams.insert(params.clone(), stream); }
+	fn sources(&mut self) -> &mut GatherSources<DT> { &mut self.sources }
+	fn wanted(&self, params: &DT::Params) -> bool { self.requests.is_waiting(params) }
+	fn is_requested(&self, params: &DT::Params, allowed_tick: &DirtyState) -> bool { self.requests.is_waiting_for(params, allowed_tick) }
 }
+
+// ============================ Registering ============================
 
 pub trait BileRegisterGather {
 	fn register_producer_gather<DT, C>(&mut self) -> &mut Self
@@ -272,11 +179,10 @@ pub trait BileRegisterGather {
 }
 
 impl BileRegisterGather for App {
+	/// Gathers `DT` from its producers, replacing the default streaming parts. Its consumers are streaming consumers.
 	fn register_producer_gather<DT, C>(&mut self) -> &mut Self
 	where DT: DataType, C: Component + DataProducingNode<DT>,
 	{
-		self.register_component_as::<dyn DataProducingNode<DT>, C>();
-		setup_bevy_resources::<DT>(self);
-		self
+		self.register_component_as::<dyn DataProducingNode<DT>, C>().set_data_parts::<DT, StreamRequester, GatherStorage<DT>, GatherFulfiller>()
 	}
 }

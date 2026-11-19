@@ -249,6 +249,19 @@ fn dirtying_updates_the_state_tick() {
 }
 
 #[test]
+fn gather_replaces_the_default_streaming_parts() {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.register_consumer_streaming::<Parts, Consumer>().register_producer_gather::<Parts, GatherProducer>();
+	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
+	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request_parts(&mut app, a);
+	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().0.len(), 1);
+	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0.len(), 1);
+}
+
+#[test]
 fn finished_stream_is_released_when_its_last_user_cancels() {
 	let mut app = App::new();
 	app.add_plugins(BileDataPlugin);

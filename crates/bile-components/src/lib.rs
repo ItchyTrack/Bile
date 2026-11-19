@@ -1,8 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
-use bevy::{ecs::component::{ComponentId, ComponentIdFor}, prelude::*, transform::TransformSystems};
-use bile_data::{DataType, DirtyState, Request, diff, simple};
-use bevy_trait_query::RegisterExt;
+use bevy::{
+	ecs::{
+		component::{ComponentId, ComponentIdFor},
+		system::StaticSystemParam,
+	},
+	prelude::*,
+};
+use bile_data::{
+	BileDataSchedule, BileDataSystemSet, BileSetDataParts, DataParts, DataType, DirtyState, Part, Request,
+	simple::{self, Requests, SimpleFulfiller, SimpleFulfillerStorage, SimpleRequester, SimpleRequesterStorage, Sources},
+};
 
 #[cfg(test)]
 mod tests;
@@ -34,63 +42,7 @@ impl<DT: ComponentData> Want<DT> {
 	pub fn is_resolved(&self) -> bool { self.resolved }
 }
 
-#[derive(Default)]
-struct Wanted {
-	entities: HashSet<Entity>,
-	source_entity: Option<Entity>, // None until the requested node passed the data
-	chain: Vec<Entity>, // earlier sources, whose data a diff was applied to
-	pending: bool, // the data in the components is out of date until a node passes
-}
-
-// The storage of the wanted data. The data is only in the components of the entities that want it.
-// It is a sink, so it does not impl the API: nothing can request from it.
-#[derive(Resource)]
-struct ComponentStorage<DT: ComponentData> {
-	wanted: HashMap<DT::Params, Wanted>,
-	dirtied: HashMap<DT::Params, Option<Vec<DT::Diff>>>, // None if the data has to be requested
-	passed: Vec<(DT::Params, DT::Data)>,
-	data_to_drop: HashMap<DT::Params, HashSet<Entity>>,
-}
-
-impl<DT: ComponentData> Default for ComponentStorage<DT> {
-	fn default() -> Self {
-		Self {
-			wanted: HashMap::default(),
-			dirtied: HashMap::default(),
-			passed: Vec::default(),
-			data_to_drop: HashMap::default(),
-		}
-	}
-}
-
-impl<DT: ComponentData> simple::DataStorage<DT> for ComponentStorage<DT> {
-	fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: &DT::Data) {
-		let Some(wanted) = self.wanted.get_mut(params) else {
-			self.data_to_drop.entry(params.clone()).or_default().insert(source_entity);
-			return;
-		};
-		if !dirty_state.satisfies(&DirtyState::UpToDate) { return; }
-		if let Some(old_source_entity) = wanted.source_entity.replace(source_entity) && old_source_entity != source_entity {
-			let old_sources = self.data_to_drop.entry(params.clone()).or_default();
-			old_sources.insert(old_source_entity);
-			old_sources.extend(wanted.chain.drain(..));
-			old_sources.remove(&source_entity);
-		}
-		wanted.pending = false;
-		self.passed.push((params.clone(), data.clone()));
-	}
-	fn dirty_data(&mut self, _data_consuming_nodes: &mut simple::DataConsumingNodes<DT>, params: &DT::Params, _last_clean_tick: u64, diff: Option<&DT::Diff>) {
-		let Some(wanted) = self.wanted.get(params) else { return; };
-		match (self.dirtied.entry(params.clone()).or_insert_with(|| (!wanted.pending).then(Vec::new)), diff) {
-			(Some(diffs), Some(diff)) => diffs.push(diff.clone()),
-			(diffs, _) => *diffs = None, // There may never be a dirty inbetween 2 diffs
-		}
-	}
-	fn uses(&self, params: &DT::Params, source_entity: Entity) -> bool {
-		self.wanted.get(params).is_some_and(|wanted| wanted.source_entity.is_none_or(|used| used == source_entity) || wanted.chain.contains(&source_entity))
-	}
-	fn drop_data(&mut self) -> HashMap<DT::Params, HashSet<Entity>> { std::mem::take(&mut self.data_to_drop) }
-}
+// ============================ Wanting ============================
 
 fn wants_for(entity: &mut EntityWorldMut, component: ComponentId) -> Vec<(ComponentId, fn(&mut EntityWorldMut))> {
 	entity.world_scope(|world| world.resource::<ComponentDataRegistry>().wants_by_component.get(&component).cloned().unwrap_or_default())
@@ -147,70 +99,235 @@ impl WantCommands for EntityCommands<'_> {
 	}
 }
 
-fn cancel_removed_want<DT: ComponentData>(remove: On<Remove<Want<DT>>>, wants: Query<&Want<DT>>, mut storage: ResMut<ComponentStorage<DT>>) {
-	let params = &wants.get(remove.entity).expect("The Want is only removed after this").params;
-	let storage = &mut *storage;
-	let Some(wanted) = storage.wanted.get_mut(params) else { return; }; // removed before it was requested
-	wanted.entities.remove(&remove.entity);
-	if wanted.entities.is_empty() {
-		let sources = storage.data_to_drop.entry(params.clone()).or_default();
-		sources.extend(wanted.source_entity);
-		sources.extend(wanted.chain.drain(..));
-		storage.wanted.remove(params);
+// ============================ Component Requester ============================
+
+/// What the component requester needs from a storage.
+pub trait ComponentRequesterStorage<DT: ComponentData>: Part {
+	fn want(&mut self, params: &DT::Params, entity: Entity);
+	/// `data` is what the component of the entity was.
+	fn unwant(&mut self, params: &DT::Params, entity: Entity, data: DT::Data);
+	/// The wanted data that is not up to date.
+	fn take_unsatisfied(&mut self) -> Vec<DT::Params>;
+	/// The fulfiller could not get the data right away, it comes later.
+	fn requested(&mut self, params: &DT::Params);
+}
+
+/// Requests the data that entities want as a component, based on their `Want`. It does not provide to a node, the
+/// storage puts the data in the components.
+pub struct ComponentRequester;
+
+impl ComponentRequester {
+	pub fn setup<DT, R, S, F>(app: &mut App)
+	where DT: ComponentData, R: Part, S: ComponentRequesterStorage<DT>, F: simple::Fulfiller<DT, S>,
+	{
+		app.add_observer(unwant_removed::<DT, R, S, F>).add_systems(BileDataSchedule, request_wanted::<DT, R, S, F>.in_set(BileDataSystemSet::Request));
 	}
 }
 
-fn update_wants<DT: ComponentData>(
+fn request_wanted<DT, R, S, F>(
+	mut parts: Query<&mut DataParts<DT, R, S, F>>,
+	mut param: StaticSystemParam<F::Param>,
+	wants: Query<(Entity, &Want<DT>), Added<Want<DT>>>,
+) where DT: ComponentData, R: Part, S: ComponentRequesterStorage<DT>, F: simple::Fulfiller<DT, S>,
+{
+	for mut parts in &mut parts {
+		let DataParts { storage, fulfiller, .. } = &mut *parts;
+		for (entity, want) in &wants {
+			storage.want(&want.params, entity);
+		}
+		for params in storage.take_unsatisfied() {
+			if !fulfiller.fulfill(storage, &mut param, Request::new(params.clone(), DirtyState::UpToDate)) {
+				storage.requested(&params);
+			}
+		}
+	}
+}
+
+fn unwant_removed<DT, R, S, F>(remove: On<Remove<Want<DT>>>, wants: Query<(&Want<DT>, Option<&DT::Component>)>, mut parts: Query<&mut DataParts<DT, R, S, F>>)
+where DT: ComponentData, R: Part, S: ComponentRequesterStorage<DT>, F: simple::Fulfiller<DT, S>,
+{
+	let (want, component) = wants.get(remove.entity).expect("The Want is only removed after this");
+	for mut parts in &mut parts {
+		parts.storage.unwant(&want.params, remove.entity, component.cloned());
+	}
+}
+
+// ============================ Component Storage ============================
+
+/// Keeps wanted data only in the components of the entities that want it, and other data in a column for the nodes,
+/// so it is never stored twice. The data is moved to where it is kept at the end of the bile update. Nodes can request
+/// the data either way.
+pub struct ComponentStorage<DT: ComponentData> {
+	entries: HashMap<DT::Params, Entry<DT>>,
+	requests: Requests<DT>,
+	sources: Sources<DT>,
+	moved: HashSet<DT::Params>,       // the components are updated at the end of the bile update
+	unsatisfied: HashSet<DT::Params>, // they may want data that is not up to date
+}
+
+struct Entry<DT: ComponentData> {
+	wanting: HashSet<Entity>,
+	holders: HashSet<Entity>, // the wanting entities whose component is the data, out of date if it was discarded
+	stored: Option<(DirtyState, Location<DT>)>, // None until a node passed the data
+	pending: bool,            // the wanted data comes later
+}
+
+enum Location<DT: ComponentData> {
+	Column(DT::Data),
+	Components,
+	Discarded, // out of date and not worth keeping
+}
+
+impl<DT: ComponentData> Default for ComponentStorage<DT> {
+	fn default() -> Self {
+		Self { entries: HashMap::default(), requests: Requests::default(), sources: Sources::default(), moved: HashSet::default(), unsatisfied: HashSet::default() }
+	}
+}
+
+impl<DT: ComponentData> Default for Entry<DT> {
+	fn default() -> Self { Self { wanting: HashSet::default(), holders: HashSet::default(), stored: None, pending: false } }
+}
+
+impl<DT: ComponentData> ComponentStorage<DT> {
+	pub fn setup<R: Part, F: Part>(app: &mut App) {
+		app.add_systems(BileDataSchedule, update_components::<DT, R, F>.in_set(BileDataSystemSet::Store));
+	}
+	fn get(&self, components: &Query<&DT::Component>, params: &DT::Params) -> Option<(DirtyState, DT::Data)> {
+		let entry = self.entries.get(params)?;
+		let (dirty_state, location) = entry.stored.as_ref()?;
+		let data = match location {
+			Location::Column(data) => data.clone(),
+			Location::Components => components.get(*entry.holders.iter().next()?).ok().cloned(),
+			Location::Discarded => return None,
+		};
+		Some((*dirty_state, data))
+	}
+	// Drops the entry if nothing wants or requests it anymore.
+	fn release_unused(&mut self, params: &DT::Params) {
+		if self.entries.get(params).is_some_and(|entry| entry.wanting.is_empty()) && !self.requests.is_requested(params) {
+			self.entries.remove(params);
+			self.sources.release(params);
+		}
+	}
+}
+
+impl<DT: ComponentData> SimpleRequesterStorage<DT> for ComponentStorage<DT> {
+	type Param = Query<'static, 'static, &'static DT::Component>;
+
+	fn data(&self, components: &Query<&DT::Component>, params: &DT::Params) -> Option<(DirtyState, DT::Data)> { self.get(components, params) }
+	fn requests(&mut self) -> &mut Requests<DT> { &mut self.requests }
+	fn release(&mut self, params: &DT::Params) { self.release_unused(params); }
+}
+
+impl<DT: ComponentData> SimpleFulfillerStorage<DT> for ComponentStorage<DT> {
+	type Param = Query<'static, 'static, &'static DT::Component>;
+
+	fn data(&self, components: &Query<&DT::Component>, params: &DT::Params) -> Option<(DirtyState, DT::Data)> { self.get(components, params) }
+	fn dirty_state(&self, params: &DT::Params) -> Option<DirtyState> { self.entries.get(params)?.stored.as_ref().map(|(dirty_state, _)| *dirty_state) }
+	fn sources(&mut self) -> &mut Sources<DT> { &mut self.sources }
+	fn wanted(&self, params: &DT::Params) -> bool {
+		self.requests.is_waiting(params) || self.entries.get(params).is_some_and(|entry| !entry.wanting.is_empty())
+	}
+	fn is_requested(&self, params: &DT::Params, allowed_tick: &DirtyState) -> bool {
+		self.requests.is_waiting_for(params, allowed_tick) || self.entries.get(params).is_some_and(|entry| entry.pending)
+	}
+	fn store(&mut self, params: &DT::Params, dirty_state: DirtyState, data: Option<DT::Data>) {
+		let entry = self.entries.entry(params.clone()).or_default();
+		entry.pending = false;
+		// Discarded data stays in the components until the new data is there.
+		entry.stored = Some((dirty_state, data.map_or(Location::Discarded, Location::Column)));
+		self.moved.insert(params.clone());
+		self.unsatisfied.insert(params.clone());
+	}
+	fn mark_dirty(&mut self, params: &DT::Params, last_clean_tick: u64) -> bool {
+		let Some((dirty_state, _)) = self.entries.get_mut(params).and_then(|entry| entry.stored.as_mut()) else { return false; };
+		*dirty_state = DirtyState::Dirty { tick: last_clean_tick };
+		self.unsatisfied.insert(params.clone());
+		true
+	}
+}
+
+impl<DT: ComponentData> ComponentRequesterStorage<DT> for ComponentStorage<DT> {
+	fn want(&mut self, params: &DT::Params, entity: Entity) {
+		self.entries.entry(params.clone()).or_default().wanting.insert(entity);
+		self.moved.insert(params.clone());
+		self.unsatisfied.insert(params.clone());
+	}
+	fn unwant(&mut self, params: &DT::Params, entity: Entity, data: DT::Data) {
+		let Some(entry) = self.entries.get_mut(params) else { return; }; // removed before it was requested
+		entry.wanting.remove(&entity);
+		// The last holder takes the data with it, so it is moved back to the column.
+		if entry.holders.remove(&entity) && entry.holders.is_empty() && let Some((_, location @ Location::Components)) = &mut entry.stored {
+			*location = Location::Column(data);
+			self.moved.insert(params.clone());
+		}
+		self.release_unused(params);
+	}
+	fn take_unsatisfied(&mut self) -> Vec<DT::Params> {
+		let entries = &self.entries;
+		self.unsatisfied
+			.drain()
+			.filter(|params| {
+				entries.get(params).is_some_and(|entry| {
+					!entry.wanting.is_empty() && !matches!(entry.stored, Some((DirtyState::UpToDate, Location::Column(_) | Location::Components)))
+				})
+			})
+			.collect()
+	}
+	fn requested(&mut self, params: &DT::Params) {
+		if let Some(entry) = self.entries.get_mut(params) {
+			entry.pending = true;
+		}
+	}
+}
+
+// Moves the up to date data that is wanted from the column into the components of the entities that want it, after
+// everything else in the bile update.
+fn update_components<DT: ComponentData, R: Part, F: Part>(
 	mut commands: Commands,
 	component: ComponentIdFor<DT::Component>,
-	mut storage: ResMut<ComponentStorage<DT>>,
-	mut data_nodes: ParamSet<(simple::DataProducingNodes<DT>, diff::DiffApplyingNodes<DT>)>,
+	mut parts: Query<&mut DataParts<DT, R, ComponentStorage<DT>, F>>,
 	components: Query<&DT::Component>,
+	mut wants: Query<&mut Want<DT>>,
 	mut resolved: MessageWriter<ComponentResolved>,
-	mut wants: ParamSet<(Query<(Entity, &Want<DT>), Added<Want<DT>>>, Query<&mut Want<DT>>)>,
 ) {
-	let storage = &mut *storage;
-	for (entity, want) in &wants.p0() {
-		storage.wanted.entry(want.params.clone()).or_default().entities.insert(entity);
-		storage.dirtied.insert(want.params.clone(), None);
-	}
-	for (params, diffs) in storage.dirtied.drain() {
-		let Some(wanted) = storage.wanted.get_mut(&params) else { continue };
-		let request = Request::new(params.clone(), DirtyState::UpToDate);
-		let best_node = simple::best_node(&data_nodes.p0(), &request);
-		if let Some(diffs) = diffs && let Some((cost, node_entity)) = diff::best_node(&data_nodes.p1(), &request, &diffs) && best_node.is_none_or(|best_node| cost < best_node.0) {
-			let mut data = wanted.entities.iter().next().and_then(|&entity| components.get(entity).ok().cloned());
-			wanted.pending = !data_nodes.p1().get_mut(node_entity).expect("This must exist as it was found in best_node").0.apply(&params, &mut data, diffs);
-			if wanted.source_entity != Some(node_entity) {
-				wanted.chain.extend(wanted.source_entity.replace(node_entity));
-			}
-			if !wanted.pending {
-				storage.passed.push((params, data));
-			}
-			continue;
-		}
-		wanted.pending = true;
-		let node_entity = best_node.expect("Data request failed to find node to fulfill the request. This should never happen!").1;
-		data_nodes.p0().get_mut(node_entity).expect("This must exist as it was found in best_node").0.request(request);
-	}
-	for (params, data) in storage.passed.drain(..) {
-		let Some(wanted) = storage.wanted.get(&params) else { continue };
-		for &entity in &wanted.entities {
-			match data.clone() {
-				Some(data) => { commands.entity(entity).try_insert(data); }
-				None => { commands.entity(entity).try_remove::<DT::Component>(); }
-			}
-			let mut wants = wants.p1();
-			let mut want = wants.get_mut(entity).expect("The entity is no longer wanted when its Want is removed");
-			if !want.resolved {
-				want.resolved = true;
-				resolved.write(ComponentResolved { entity, component: component.get() });
+	for mut parts in &mut parts {
+		let storage = &mut parts.storage;
+		for params in std::mem::take(&mut storage.moved) {
+			let Some(entry) = storage.entries.get_mut(&params) else { continue; };
+			if entry.wanting.is_empty() { continue; }
+			let (data, entities): (DT::Data, Vec<Entity>) = match &mut entry.stored {
+				Some((DirtyState::UpToDate, location @ Location::Column(_))) => {
+					let Location::Column(data) = std::mem::replace(location, Location::Components) else { unreachable!() };
+					entry.holders.clear();
+					(data, entry.wanting.iter().copied().collect())
+				}
+				// the entities that want it anew
+				Some((_, Location::Components)) => {
+					let Some(&holder) = entry.holders.iter().next() else { continue; };
+					(components.get(holder).ok().cloned(), entry.wanting.difference(&entry.holders).copied().collect())
+				}
+				_ => continue,
+			};
+			for entity in entities {
+				match data.clone() {
+					Some(data) => { commands.entity(entity).try_insert(data); }
+					None => { commands.entity(entity).try_remove::<DT::Component>(); }
+				}
+				entry.holders.insert(entity);
+				if let Ok(mut want) = wants.get_mut(entity) && !want.resolved {
+					want.resolved = true;
+					resolved.write(ComponentResolved { entity, component: component.get() });
+				}
 			}
 		}
 	}
 }
 
+// ============================ Registering ============================
+
 pub trait AddComponentData {
+	/// Moves `DT` around with the component storage, so entities can want it as a component.
 	fn add_component_data<DT: ComponentData>(&mut self) -> &mut Self;
 }
 
@@ -219,10 +336,9 @@ impl AddComponentData for App {
 		let component = self.world_mut().register_component::<DT::Component>();
 		let want = self.world_mut().register_component::<Want<DT>>();
 		self.world_mut().get_resource_or_init::<ComponentDataRegistry>().wants_by_component.entry(component).or_default().push((want, unwant::<DT>));
-		self.add_message::<ComponentResolved>()
-			.init_resource::<ComponentStorage<DT>>()
-			.register_component_as::<dyn simple::DataStorage<DT>, ComponentStorage<DT>>()
-			.add_observer(cancel_removed_want::<DT>)
-			.add_systems(PostUpdate, update_wants::<DT>.before(TransformSystems::Propagate))
+		self.add_message::<ComponentResolved>().set_data_parts::<DT, SimpleRequester, ComponentStorage<DT>, SimpleFulfiller>();
+		ComponentRequester::setup::<DT, SimpleRequester, ComponentStorage<DT>, SimpleFulfiller>(self);
+		ComponentStorage::<DT>::setup::<SimpleRequester, SimpleFulfiller>(self);
+		self
 	}
 }

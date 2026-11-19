@@ -65,9 +65,11 @@ pub struct BileDataSchedule;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BileDataSystemSet {
+	Request, // requests that are made from wants, not by nodes
 	DropData,
 	PassData,
 	UpdateStateTick,
+	Store, // storages move their data to where it is kept, after everything else
 }
 
 pub struct BileDataDefaultPlugin;
@@ -82,9 +84,11 @@ impl Plugin for BileDataDefaultPlugin {
 		app.configure_sets(
 			BileDataSchedule,
 			(
+				BileDataSystemSet::Request,
 				BileDataSystemSet::DropData,
 				BileDataSystemSet::PassData,
 				BileDataSystemSet::UpdateStateTick,
+				BileDataSystemSet::Store,
 			).chain(),
 		);
 
