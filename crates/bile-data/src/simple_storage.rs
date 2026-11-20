@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::{DataType, DirtyState, simple::Requests};
+use crate::{DataType, DirtyState};
 
 use crate::{Request, simple_consuming};
 use crate::simple_producing;
@@ -13,11 +13,10 @@ use crate::simple_producing;
 #[derive(Component)]
 pub struct Storage<DT: DataType> {
 	data: HashMap<DT::Params, (DirtyState, Option<DT::Data>)>,
-	requests: Requests<DT>,
 }
 
 impl<DT: DataType> Default for Storage<DT> {
-	fn default() -> Self { Self { data: HashMap::default(), requests: Requests::default() } }
+	fn default() -> Self { Self { data: HashMap::default() } }
 }
 
 impl<DT: DataType> Storage<DT> {

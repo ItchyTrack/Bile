@@ -13,9 +13,10 @@ use bevy_trait_query::{All, One, RegisterExt};
 
 use crate::{
 	dyn_system_params::{DynParam, DynSystemParams, RegisterDynParam},
-	parts::{BileDataParts, DataPart, DataStorage, Storage},
 	setup::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick},
 };
+
+// TODO: redo everything here. The current code is very bad.
 
 // ============================ Nodes ============================
 

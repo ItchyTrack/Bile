@@ -1,7 +1,4 @@
-use bevy::{ecs::system::SystemParam, prelude::*};
-use bevy_trait_query::One;
-
-use crate::{DataType, DirtyState, Request};
+use crate::{DataType, Request};
 
 // ============================ API ============================
 

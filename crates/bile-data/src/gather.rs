@@ -7,7 +7,6 @@ use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{
-	parts::{BileDataParts, DataPart},
 	setup::{DataType, DirtyState, Request},
 	streaming::{Fulfiller, Stream, StreamFulfillerStorage, StreamId, StreamStorage, setup_fulfiller},
 };
