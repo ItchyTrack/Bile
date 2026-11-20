@@ -1,4 +1,4 @@
-use std::{marker::PhantomData};
+use std::marker::PhantomData;
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_trait_query::One;
