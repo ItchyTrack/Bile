@@ -13,27 +13,12 @@ use bevy_trait_query::{All, One, RegisterExt};
 use crate::{
 	diff::{self, DiffApplyingNodes},
 	dyn_system_params::{DynParam, DynSystemParams, RegisterDynParam},
-	parts::{BileDataParts, DataPart, DataStorage, Storage},
 	setup::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, StateTick},
 };
 
 // ============================ Nodes ============================
 
-#[bevy_trait_query::queryable]
-pub trait DataConsumingNode<DT: DataType> {
-	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data);
-	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
-}
 
-#[bevy_trait_query::queryable]
-pub trait DataProducingNode<DT: DataType> {
-	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request
-	fn request(&mut self, request: Request<DT>);
-	fn drop(&mut self, params: &DT::Params);
-}
-
-pub type DataProducingNodes<'w, 's, DT> = Query<'w, 's, (One<&'static mut dyn DataProducingNode<DT>>, Entity)>;
-pub type DataConsumingNodes<'w, 's, DT> = Query<'w, 's, One<&'static mut dyn DataConsumingNode<DT>>>;
 
 // None if no node can fulfill the request
 pub fn best_node<DT: DataType>(data_producing_nodes: &DataProducingNodes<DT>, request: &Request<DT>) -> Option<(f32, Entity)> {
@@ -42,71 +27,9 @@ pub fn best_node<DT: DataType>(data_producing_nodes: &DataProducingNodes<DT>, re
 
 // ============================ Entry points ============================
 
-#[derive(SystemParam)]
-pub struct DataRequester<'w, 's, DT: DataType> {
-	requester: Query<'w, 's, (One<&'static mut dyn NodeRequester<DT>>, One<&'static mut dyn DataStorage<DT>>)>,
-	system_params: DynSystemParams<'w, 's, Requesting<DT>>,
-	fulfillers: Fulfillers<'w, 's, DT>,
-}
 
-impl<DT: DataType> DataRequester<'_, '_, DT> {
-	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		let Ok((mut requester, mut storage)) = self.requester.single_mut() else {
-			panic!("{} has no requester for nodes, a consuming node of it has to be registered.", type_name::<DT>())
-		};
-		requester.request(&mut *storage, &mut self.system_params, &mut self.fulfillers, request, requester_node)
-	}
-	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
-		if let Ok((mut requester, mut storage)) = self.requester.single_mut() && requester.cancel(&mut *storage, params, requester_node) {
-			self.fulfillers.release(&mut *storage, params);
-		}
-	}
-}
 
-#[derive(SystemParam)]
-pub struct DataPasser<'w, 's, DT: DataType> {
-	parts: Query<'w, 's, (One<&'static mut dyn DataStorage<DT>>, All<&'static mut dyn ErasedFulfiller<DT>>)>,
-}
 
-impl<DT: DataType> DataPasser<'_, '_, DT> {
-	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
-		let Ok((mut storage, fulfillers)) = self.parts.single_mut() else { return; };
-		let mut fulfillers: Vec<_> = fulfillers.into_iter().collect();
-		// Only the fulfiller that asked the node gets the data. If it stored it, the data no longer comes from the others.
-		let Some(source) = fulfillers.iter().position(|fulfiller| fulfiller.is_source(params, source_entity)) else { return; };
-		if fulfillers[source].pass_data(&mut *storage, source_entity, params, dirty_state, data) {
-			for (index, fulfiller) in fulfillers.iter_mut().enumerate() {
-				if index != source {
-					fulfiller.release(&mut *storage, params);
-				}
-			}
-		}
-	}
-}
-
-#[derive(SystemParam)]
-pub struct DataDirtier<'w, 's, DT: DataType> {
-	bile_state_tick: Res<'w, StateTick>,
-	parts: Query<
-		'w,
-		's,
-		(One<&'static mut dyn DataStorage<DT>>, Option<All<&'static mut dyn ErasedFulfiller<DT>>>, Option<All<&'static mut dyn ErasedRequester<DT>>>),
-	>,
-	system_params: DynSystemParams<'w, 's, Dirtying<DT>>,
-}
-
-impl<DT: DataType> DataDirtier<'_, '_, DT> {
-	pub fn mark_dirty(&mut self, params: &DT::Params, diff: Option<&DT::Diff>) {
-		let last_clean_tick = self.bile_state_tick.update(); /* Was valid on the last tick */
-		let Ok((mut storage, fulfillers, requesters)) = self.parts.single_mut() else { return; };
-		for mut fulfiller in fulfillers.into_iter().flatten() {
-			fulfiller.mark_dirty(&mut *storage, params, last_clean_tick, diff);
-		}
-		for mut requester in requesters.into_iter().flatten() {
-			requester.mark_dirty(&mut *storage, &mut self.system_params, params, last_clean_tick, diff);
-		}
-	}
-}
 
 /// The fulfillers of a data type. A request is fulfilled by the cheapest of them.
 #[derive(SystemParam)]
@@ -186,23 +109,6 @@ fn drop_data<DT: DataType, F: Fulfiller<DT>>(mut parts: Query<(&mut F, &F::Stora
 	for (mut fulfiller, storage) in &mut parts {
 		fulfiller.drop_data(storage, &mut param);
 	}
-}
-
-// The entry points reach the parts through these, they do not know their types.
-
-/// The requester `DataRequester` reaches, the one of the consuming nodes.
-#[bevy_trait_query::queryable]
-pub trait NodeRequester<DT: DataType> {
-	fn request(
-		&mut self,
-		storage: &mut dyn DataStorage<DT>,
-		system_params: &mut DynSystemParams<Requesting<DT>>,
-		fulfillers: &mut Fulfillers<DT>,
-		request: Request<DT>,
-		requester_node: Entity,
-	) -> Option<DT::Data>;
-	/// Returns true if the storage dropped the data.
-	fn cancel(&mut self, storage: &mut dyn DataStorage<DT>, params: &DT::Params, requester_node: Entity) -> bool;
 }
 
 #[bevy_trait_query::queryable]
