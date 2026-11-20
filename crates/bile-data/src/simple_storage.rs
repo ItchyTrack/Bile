@@ -34,11 +34,11 @@ impl<DT: DataType> simple_consuming::StorageRequesterAPI<DT> for Storage<DT> {
 	// fn requests(&mut self) -> &mut Requests<DT> { &mut self.requests }
 	// fn release(&mut self, params: &DT::Params) -> bool { self.data.remove(params).is_some() }
 
-	fn request(&mut self,request: Request<DT>) -> Option<DT::Data>  {
+	fn request(&mut self, request: Request<DT>) -> Option<DT::Data>  {
 		todo!()
 	}
 
-	fn cancel(&mut self,params: &DT::Params) {
+	fn cancel(&mut self, params: &DT::Params) {
 		todo!()
 	}
 }
@@ -62,11 +62,11 @@ impl<DT: DataType> simple_producing::StorageFulfillerAPI<DT> for Storage<DT> {
 	// 	true
 	// }
 
-	fn pass_data(&mut self,params: &DT::Params,tick: u64,data: DT::Data) {
+	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data) {
 		todo!()
 	}
 
-	fn dirty_data(&mut self,params: &DT::Params,last_clean_tick: u64,diff: Option< &DT::Diff>) {
+	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option< &DT::Diff>) {
 		todo!()
 	}
 }
