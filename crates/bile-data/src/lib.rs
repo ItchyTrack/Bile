@@ -2,7 +2,6 @@ pub mod setup;
 pub mod diff;
 pub mod dyn_system_params;
 pub mod gather;
-pub mod simple;
 pub mod simple_consuming;
 pub mod simple_producing;
 pub mod simple_storage;
