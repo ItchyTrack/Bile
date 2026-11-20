@@ -171,14 +171,12 @@ pub struct Dirtying<DT>(PhantomData<fn() -> DT>);
 // ============================ Parts ============================
 
 /// Streams the data from the storage to whoever asks for it.
-pub trait Requester<DT: DataType>: DataPart<DT> {
-	type Param: SystemParam + 'static; // to reach whoever has the data
-
+pub trait Requester<DT: DataType> {
 	fn mark_dirty(&mut self, storage: &mut Self::Storage, param: &mut SystemParamItem<Self::Param>, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
 }
 
 /// Gets the streams into the storage from its kind of producing nodes.
-pub trait Fulfiller<DT: DataType>: DataPart<DT> {
+pub trait Fulfiller<DT: DataType> {
 	type Param: SystemParam + 'static; // to reach the producing nodes
 
 	/// None if it can not fulfill the request.
@@ -237,10 +235,6 @@ impl<DT: DataType, R: Requester<DT>> ErasedRequester<DT> for R {
 	}
 }
 
-impl<DT: DataType, R: Requester<DT>> DynParam<Dirtying<DT>> for R {
-	type Param = R::Param;
-}
-
 #[bevy_trait_query::queryable]
 pub trait ErasedFulfiller<DT: DataType> {
 	fn cost(&self, storage: &dyn DataStorage<DT>, system_params: &mut DynSystemParams<Fulfilling<DT>>, request: &Request<DT>) -> Option<f32>;
@@ -272,10 +266,6 @@ impl<DT: DataType, F: Fulfiller<DT>> ErasedFulfiller<DT> for F {
 		<F as Fulfiller<DT>>::mark_dirty(self, storage.downcast_mut(), params, last_clean_tick);
 	}
 	fn release(&mut self, storage: &mut dyn DataStorage<DT>, params: &DT::Params) { <F as Fulfiller<DT>>::release(self, storage.downcast_mut(), params); }
-}
-
-impl<DT: DataType, F: Fulfiller<DT>> DynParam<Fulfilling<DT>> for F {
-	type Param = F::Param;
 }
 
 /// The stream that is currently accepted for a given `params`. After it is finished it is kept only while something
@@ -505,11 +495,11 @@ impl<DT: DataType, S: StreamFulfillerStorage<DT>> StreamFulfiller<DT, S> {
 	}
 }
 
-impl<DT: DataType, S: StreamFulfillerStorage<DT>> DataPart<DT> for StreamFulfiller<DT, S> {
-	type Storage = S;
+// impl<DT: DataType, S: StreamFulfillerStorage<DT>> DataPart<DT> for StreamFulfiller<DT, S> {
+// 	type Storage = S;
 
-	fn setup(app: &mut App) { setup_fulfiller::<DT, Self>(app); }
-}
+// 	fn setup(app: &mut App) { setup_fulfiller::<DT, Self>(app); }
+// }
 
 impl<DT: DataType, S: StreamFulfillerStorage<DT>> Fulfiller<DT> for StreamFulfiller<DT, S> {
 	type Param = DataProducingNodes<'static, 'static, DT>;

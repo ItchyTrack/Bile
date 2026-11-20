@@ -2,10 +2,9 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::{DataType, DirtyState};
+use crate::{Request, DataType, DirtyState};
 
-use crate::{Request, simple_consuming};
-use crate::simple_producing;
+use crate::{simple_consuming, simple_producing};
 
 // ============================ Simple Storage ============================
 
@@ -27,22 +26,42 @@ impl<DT: DataType> Storage<DT> {
 }
 
 impl<DT: DataType> simple_consuming::StorageRequesterAPI<DT> for Storage<DT> {
+	fn request(
+		&mut self,
+		storage_params: &mut simple_consuming::DynStorageParams<DT>,
+		request: Request<DT>,
+	) -> Option<DT::Data>  { todo!() }
+
+	fn cancel(
+		&mut self,
+		storage_params: &mut simple_consuming::DynStorageParams<DT>,
+		params: &DT::Params,
+	) { todo!() }
+
 	// type Param = ();
 
 	// fn data(&self, _param: &(), params: &DT::Params) -> Option<(DirtyState, DT::Data)> { self.get(params) }
 	// fn requests(&mut self) -> &mut Requests<DT> { &mut self.requests }
 	// fn release(&mut self, params: &DT::Params) -> bool { self.data.remove(params).is_some() }
-
-	fn request(&mut self, request: Request<DT>) -> Option<DT::Data>  {
-		todo!()
-	}
-
-	fn cancel(&mut self, params: &DT::Params) {
-		todo!()
-	}
 }
 
 impl<DT: DataType> simple_producing::StorageFulfillerAPI<DT> for Storage<DT> {
+	fn pass_data(
+		&mut self,
+		storage_params: &mut simple_producing::DynStorageParams<DT>,
+		params: &DT::Params,
+		tick: u64,
+		data: DT::Data,
+	) { todo!() }
+
+	fn dirty_data(
+		&mut self,
+		storage_params: &mut simple_producing::DynStorageParams<DT>,
+		params: &DT::Params,
+		last_clean_tick: u64,
+		diff: Option<&DT::Diff>,
+	) { todo!() }
+
 	// type Param = ();
 
 	// fn data(&self, _param: &(), params: &DT::Params) -> Option<(DirtyState, DT::Data)> { self.get(params) }
@@ -60,12 +79,4 @@ impl<DT: DataType> simple_producing::StorageFulfillerAPI<DT> for Storage<DT> {
 	// 	*dirty_state = DirtyState::Dirty { tick: last_clean_tick };
 	// 	true
 	// }
-
-	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data) {
-		todo!()
-	}
-
-	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option< &DT::Diff>) {
-		todo!()
-	}
 }

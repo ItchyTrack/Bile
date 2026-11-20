@@ -124,14 +124,14 @@ impl<DT: ComponentData, S> Default for ComponentRequester<DT, S> {
 	fn default() -> Self { Self { released: Vec::new(), _marker: PhantomData } }
 }
 
-impl<DT: ComponentData, S: ComponentRequesterStorage<DT>> DataPart<DT> for ComponentRequester<DT, S> {
-	type Storage = S;
+// impl<DT: ComponentData, S: ComponentRequesterStorage<DT>> DataPart<DT> for ComponentRequester<DT, S> {
+// 	type Storage = S;
 
-	fn setup(app: &mut App) {
-		simple::setup_requester::<DT, Self>(app);
-		app.add_observer(unwant_removed::<DT, S>).add_systems(BileDataSchedule, request_wanted::<DT, S>.in_set(BileDataSystemSet::Request));
-	}
-}
+// 	fn setup(app: &mut App) {
+// 		simple::setup_requester::<DT, Self>(app);
+// 		app.add_observer(unwant_removed::<DT, S>).add_systems(BileDataSchedule, request_wanted::<DT, S>.in_set(BileDataSystemSet::Request));
+// 	}
+// }
 
 impl<DT: ComponentData, S: ComponentRequesterStorage<DT>> Requester<DT> for ComponentRequester<DT, S> {
 	type Param = ();
