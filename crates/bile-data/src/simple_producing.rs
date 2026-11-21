@@ -16,7 +16,7 @@ impl<DT: DataType> Default for StorageParams<DT> {
 pub type DynStorageParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, StorageParams<DT>>;
 
 #[bevy_trait_query::queryable]
-pub trait StorageFulfillerAPI<DT: DataType> {
+pub trait StorageFulfillerAPI<DT: DataType>: Resource {
 	fn pass_data(
 		&mut self,
 		storage_params: &mut DynStorageParams<DT>,

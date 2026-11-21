@@ -67,15 +67,16 @@ pub trait ConsumingNodeAPI<DT: DataType> {
 
 // Requester
 
+#[derive(Resource)]
 pub struct RequesterBookkeeping<DT: DataType> {
 	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
 	usages: HashMap<DT::Params, HashSet<Entity>>,
 }
 
-pub struct RequesterSystemParams<DT: DataType>;
+pub struct RequesterSystemParams<DT: DataType>(PhantomData<DT>);
 
-impl<'w, 's, DT: DataType> DynParam<RequesterParams<DT>> for RequesterSystemParams<DT> {
-	type Param = Query<'w, 's, One<&'static mut dyn ConsumingNodeAPI<DT>>>;
+impl<DT: DataType> DynParam<RequesterParams<DT>> for RequesterSystemParams<DT> {
+	type Param = Query<'static, 'static, One<&'static mut dyn ConsumingNodeAPI<DT>>>;
 }
 
 impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
@@ -86,11 +87,11 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 		dirty_state: &DirtyState,
 		data: &DT::Data,
 	) {
-		let Some(waiting) = self.waiting.get(params) else { return; };
-		let consuming_nodes = requester_params.get::<RequesterSystemParams>();
-		waiting.extract_if(|(&entity, wanted_dirty_state)| {
+		let Some(waiting) = self.waiting.get_mut(params) else { return; };
+		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
+		waiting.extract_if(|&entity, wanted_dirty_state| {
 			if !dirty_state.satisfies(wanted_dirty_state) { return false; }
-			let Ok(mut node) = consuming_nodes.get(entity) else { return true; };
+			let Ok(mut node) = consuming_nodes.get_mut(entity) else { return true; };
 			self.usages.entry(params.clone()).or_default().insert(entity);
 			node.pass_data(params, dirty_state, data);
 			true
@@ -105,9 +106,9 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 		diff: Option<&DT::Diff>,
 	) {
 		let Some(usages) = self.usages.get(params) else { return; };
-		let consuming_nodes = requester_params.get::<RequesterSystemParams>();
+		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
 		for &usage in usages {
-			let Ok(mut node) = consuming_nodes.get(usage) else { continue; };
+			let Ok(mut node) = consuming_nodes.get_mut(usage) else { continue; };
 			node.dirty_data(params, last_clean_tick, diff);
 		}
 	}
