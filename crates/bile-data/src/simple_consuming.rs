@@ -16,16 +16,16 @@ pub trait ConsumingNodeAPI<DT: DataType> {
 
 // ============================ Requester ============================
 
-#[derive(Resource)]
-pub struct RequesterBookkeeping<DT: DataType> {
-	waiting: HashMap<DT::Params, (HashMap<Entity, BTreeSet<DirtyState>>, BTreeMap<DirtyState, HashSet<Entity>>)>,
-	usages: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
-}
-
 pub struct RequesterSystemParams<DT: DataType>(PhantomData<DT>);
 
 impl<DT: DataType> DynParam<RequesterParams<DT>> for RequesterSystemParams<DT> {
 	type Param = Query<'static, 'static, One<&'static mut dyn ConsumingNodeAPI<DT>>>;
+}
+
+#[derive(Resource)]
+pub struct RequesterBookkeeping<DT: DataType> {
+	waiting: HashMap<DT::Params, (HashMap<Entity, BTreeSet<DirtyState>>, BTreeMap<DirtyState, HashSet<Entity>>)>,
+	usages: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
 }
 
 impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {

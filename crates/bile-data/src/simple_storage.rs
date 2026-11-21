@@ -1,13 +1,27 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use bevy::prelude::*;
+use bevy_trait_query::One;
 
+use crate::dyn_system_params::DynParam;
 use crate::{DataType, DirtyState, Request};
-use crate::simple_api::{DynStorageFulfillerParams, DynStorageRequesterParams, StorageFulfillerAPI, StorageRequesterAPI};
+use crate::simple_api::{DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams};
 
 // ============================ Simple Storage ============================
 
-/// Keeps the data in a column.
+pub struct StorageRequesterSystemParams<DT: DataType>(PhantomData<DT>);
+
+impl<DT: DataType> DynParam<StorageRequesterParams<DT>> for StorageRequesterSystemParams<DT> {
+	type Param = Query<'static, 'static, One<&'static mut dyn FulfillerAPI<DT>>>;
+}
+
+pub struct StorageFulfillerSystemParams<DT: DataType>(PhantomData<DT>);
+
+impl<DT: DataType> DynParam<StorageFulfillerParams<DT>> for StorageFulfillerSystemParams<DT> {
+	type Param = Query<'static, 'static, One<&'static mut dyn RequesterAPI<DT>>>;
+}
+
 #[derive(Component)]
 pub struct Storage<DT: DataType> {
 	data: HashMap<DT::Params, (DirtyState, Option<DT::Data>)>,
@@ -27,9 +41,15 @@ impl<DT: DataType> Storage<DT> {
 impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 	fn request(
 		&mut self,
-		_storage_params: &mut DynStorageRequesterParams<DT>,
+		storage_params: &mut DynStorageRequesterParams<DT>,
 		_request: &Request<DT>,
-	) -> Option<(DT::Data, DirtyState)>  { todo!() }
+	) -> Option<(DT::Data, DirtyState)>  {
+		// check storage
+		let _fulfiller_nodes = storage_params.get::<StorageRequesterSystemParams<DT>>();
+		// get best cost
+		// request from best
+		None
+	}
 
 	fn cancel(
 		&mut self,
@@ -38,12 +58,6 @@ impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 		_latest: DirtyState,
 		_oldest: Option<u64>, // None if everything before latest
 	) { todo!() }
-
-	// type Param = ();
-
-	// fn data(&self, _param: &(), params: &DT::Params) -> Option<(DirtyState, DT::Data)> { self.get(params) }
-	// fn requests(&mut self) -> &mut Requests<DT> { &mut self.requests }
-	// fn release(&mut self, params: &DT::Params) -> bool { self.data.remove(params).is_some() }
 }
 
 impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
@@ -62,22 +76,4 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 		_last_clean_tick: u64,
 		_diff: Option<&DT::Diff>,
 	) { todo!() }
-
-	// type Param = ();
-
-	// fn data(&self, _param: &(), params: &DT::Params) -> Option<(DirtyState, DT::Data)> { self.get(params) }
-	// fn dirty_state(&self, params: &DT::Params) -> Option<DirtyState> { self.data.get(params).map(|(dirty_state, _)| *dirty_state) }
-	// fn wanted(&self, params: &DT::Params) -> bool { self.requests.is_waiting(params) }
-	// fn is_requested(&self, params: &DT::Params, allowed_tick: DirtyState) -> bool { self.requests.is_waiting_for(params, allowed_tick) }
-	// fn store(&mut self, params: &DT::Params, dirty_state: DirtyState, data: Option<DT::Data>) {
-	// 	if data.is_some() {
-	// 		self.requests.stored(params, dirty_state);
-	// 	}
-	// 	self.data.insert(params.clone(), (dirty_state, data));
-	// }
-	// fn mark_dirty(&mut self, params: &DT::Params, last_clean_tick: u64) -> bool {
-	// 	let Some((dirty_state, _)) = self.data.get_mut(params) else { return false; };
-	// 	*dirty_state = DirtyState::Dirty { tick: last_clean_tick };
-	// 	true
-	// }
 }
