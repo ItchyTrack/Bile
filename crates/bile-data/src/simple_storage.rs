@@ -19,7 +19,7 @@ impl<DT: DataType> Default for Storage<DT> {
 }
 
 impl<DT: DataType> Storage<DT> {
-	fn get(&self, params: &DT::Params) -> Option<(DirtyState, DT::Data)> {
+	pub fn get(&self, params: &DT::Params) -> Option<(DirtyState, DT::Data)> {
 		let (dirty_state, data) = self.data.get(params)?;
 		Some((*dirty_state, data.clone()?))
 	}
@@ -28,14 +28,14 @@ impl<DT: DataType> Storage<DT> {
 impl<DT: DataType> simple_consuming::StorageRequesterAPI<DT> for Storage<DT> {
 	fn request(
 		&mut self,
-		storage_params: &mut simple_consuming::DynStorageParams<DT>,
-		request: Request<DT>,
+		_storage_params: &mut simple_consuming::DynStorageParams<DT>,
+		_request: Request<DT>,
 	) -> Option<DT::Data>  { todo!() }
 
 	fn cancel(
 		&mut self,
-		storage_params: &mut simple_consuming::DynStorageParams<DT>,
-		params: &DT::Params,
+		_storage_params: &mut simple_consuming::DynStorageParams<DT>,
+		_params: &DT::Params,
 	) { todo!() }
 
 	// type Param = ();
@@ -48,18 +48,18 @@ impl<DT: DataType> simple_consuming::StorageRequesterAPI<DT> for Storage<DT> {
 impl<DT: DataType> simple_producing::StorageFulfillerAPI<DT> for Storage<DT> {
 	fn pass_data(
 		&mut self,
-		storage_params: &mut simple_producing::DynStorageParams<DT>,
-		params: &DT::Params,
-		tick: u64,
-		data: DT::Data,
+		_storage_params: &mut simple_producing::DynStorageParams<DT>,
+		_params: &DT::Params,
+		_tick: u64,
+		_data: DT::Data,
 	) { todo!() }
 
 	fn dirty_data(
 		&mut self,
-		storage_params: &mut simple_producing::DynStorageParams<DT>,
-		params: &DT::Params,
-		last_clean_tick: u64,
-		diff: Option<&DT::Diff>,
+		_storage_params: &mut simple_producing::DynStorageParams<DT>,
+		_params: &DT::Params,
+		_last_clean_tick: u64,
+		_diff: Option<&DT::Diff>,
 	) { todo!() }
 
 	// type Param = ();

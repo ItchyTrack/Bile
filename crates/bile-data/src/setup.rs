@@ -13,7 +13,7 @@ impl StateTick {
 	}
 
 	// Returns the tick before the update
-	pub(crate) fn update(&self) -> u64 {
+	pub(crate) fn _update(&self) -> u64 {
 		self.current_tick.fetch_add(1, Ordering::Relaxed)
 	}
 }
