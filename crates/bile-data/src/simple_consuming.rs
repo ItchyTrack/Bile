@@ -113,8 +113,6 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 	}
 }
 
-// impl RegisterDynParam for RequesterBookkeeping so storage can query them so pass data can go strait to Consumers
-
 #[derive(SystemParam)]
 pub struct Requester<'w, 's, DT: DataType> {
 	requester: ResMut<'w, RequesterBookkeeping<DT>>,
@@ -124,11 +122,15 @@ pub struct Requester<'w, 's, DT: DataType> {
 
 impl<DT: DataType> Requester<'_, '_, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		self.storage.request(request,)
-		// TODO: add bookkeeping using `waiting`, `finished`, `usages`.
+		if let Some(data) = self.storage.request(self.storage_params, request) {
+			self.requester.usages.entry(request.params).or_default().insert(requester_node);
+			return data;
+		}
+		self.requester.waiting.entry(request.params).or_default().insert(requester_node, request.allowed_tick);
+		None
 	}
 	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
-		self.storage.cancel(params);
-		// TODO: update bookkeeping using `waiting`, `finished`, `usages`.
+		self.storage.cancel(self.storage_params, params);
+		// TODO: update bookkeeping using `waiting`, `usages`.
 	}
 }
