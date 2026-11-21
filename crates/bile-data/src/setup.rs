@@ -60,6 +60,12 @@ impl<DT: DataType> Request<DT> {
 	}
 }
 
+impl<DT: DataType> Clone for Request<DT> {
+	fn clone(&self) -> Self {
+		Self { params: self.params.clone(), allowed_tick: self.allowed_tick.clone() }
+	}
+}
+
 #[derive(ScheduleLabel, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BileDataSchedule;
 

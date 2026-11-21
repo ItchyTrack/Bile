@@ -117,21 +117,36 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 #[derive(SystemParam)]
 pub struct Requester<'w, 's, DT: DataType> {
 	requester: ResMut<'w, RequesterBookkeeping<DT>>,
-	storage: ResMut<'w, One<&'static mut dyn StorageRequesterAPI<DT>>>,
+	storage: Single<'w, 's, One<&'static mut dyn StorageRequesterAPI<DT>>>,
 	storage_params: DynStorageParams<'w, 's, DT>,
 }
 
 impl<DT: DataType> Requester<'_, '_, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		if let Some(data) = self.storage.request(self.storage_params, request) {
+		if let Some(data) = self.storage.request(&mut self.storage_params, request.clone()) {
 			self.requester.usages.entry(request.params).or_default().insert(requester_node);
-			return data;
+			return Some(data);
 		}
 		self.requester.waiting.entry(request.params).or_default().insert(requester_node, request.allowed_tick);
 		None
 	}
 	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
-		self.storage.cancel(self.storage_params, params);
-		// TODO: update bookkeeping using `waiting`, `usages`.
+		let used = if let Some(usages) = self.requester.usages.get_mut(params) {
+			usages.remove(&requester_node);
+			if usages.is_empty() {
+				self.requester.usages.remove(params);
+				false
+			} else { true }
+		} else { false };
+		let waited = if let Some(waiting) = self.requester.waiting.get_mut(params) {
+			waiting.remove(&requester_node);
+			if waiting.is_empty() {
+				self.requester.waiting.remove(params);
+				false
+			} else { true }
+		} else { false };
+		if used || waited {
+			self.storage.cancel(&mut self.storage_params, params);
+		}
 	}
 }
