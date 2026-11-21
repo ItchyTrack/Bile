@@ -5,65 +5,7 @@ use bevy_trait_query::One;
 
 use crate::{DataType, Request, dyn_system_params::DynSystemParams};
 
-// ============================ API ============================
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StreamId(u64);
-
-pub struct StorageParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for StorageParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynStorageParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, StorageParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait StorageRequesterAPI<DT: DataType> {
-	fn request(
-		&mut self,
-		storage_params: &mut DynSystemParams<StorageParams<DT>>,
-		request: Request<DT>,
-	) -> StreamId;
-	fn cancel(
-		&mut self,
-		storage_params: &mut DynSystemParams<StorageParams<DT>>,
-		params: &DT::Params,
-	);
-}
-
-pub struct RequesterParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for RequesterParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynRequesterParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, RequesterParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait RequesterAPI<DT: DataType> {
-	fn push(&mut self,
-		requester_params: &mut DynRequesterParams<DT>,
-		stream_id: StreamId,
-		params: &DT::Params,
-		data: DT::Data,
-	);
-	fn finish(&mut self,
-		requester_params: &mut DynRequesterParams<DT>,
-		stream_id: StreamId,
-		params: &DT::Params,
-	);
-	fn dirty_data(&mut self,
-		requester_params: &mut DynRequesterParams<DT>,
-		params: &DT::Params,
-		last_clean_tick: u64,
-		diff: Option<&DT::Diff>,
-	);
-}
-
-// ============================ Impl ============================
-
-// Consuming API
+// ============================ Consuming API ============================
 
 #[bevy_trait_query::queryable]
 pub trait ConsumingNodeAPI<DT: DataType> {
@@ -76,7 +18,7 @@ pub trait ConsumingNodeAPI<DT: DataType> {
 pub struct Requester<'w, 's, DT: DataType> {
 	requester: ResMut<'w, RequesterBookkeeping<DT>>,
 	storage: ResMut<'w, One<&'static mut dyn StorageRequesterAPI<DT>>>,
-	storage_params: DynStorageParams<'w, 's, DT>,
+	storage_params: DynStorageRequesterParams<'w, 's, DT>,
 }
 
 pub struct RequesterBookkeeping<DT: DataType> { }
