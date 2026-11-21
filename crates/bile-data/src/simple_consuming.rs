@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::One;
 
 use crate::{DataType, DirtyState, Request, dyn_system_params::{DynParam, DynSystemParams}};
@@ -117,7 +117,7 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 #[derive(SystemParam)]
 pub struct Requester<'w, 's, DT: DataType> {
 	requester: ResMut<'w, RequesterBookkeeping<DT>>,
-	storage: Single<'w, 's, One<&'static mut dyn StorageRequesterAPI<DT>>>,
+	storage: Single<'w, 's, One<&'static mut dyn StorageRequesterAPI<DT>>, With<IsResource>>,
 	storage_params: DynStorageParams<'w, 's, DT>,
 }
 
