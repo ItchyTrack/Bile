@@ -1,63 +1,12 @@
 use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
-use bevy_trait_query::One;
+use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, dyn_system_params::{DynParam, DynSystemParams}};
+use crate::{DataType, DirtyState, Request, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::simple_api::{DynRequesterParams, DynStorageRequesterParams, RequesterAPI, RequesterParams, StorageRequesterAPI};
 
-// ============================ API ============================
-
-pub struct StorageParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for StorageParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynStorageParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, StorageParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait StorageRequesterAPI<DT: DataType> {
-	fn request(
-		&mut self,
-		storage_params: &mut DynSystemParams<StorageParams<DT>>,
-		request: Request<DT>,
-	) -> Option<DT::Data>;
-	fn cancel(
-		&mut self,
-		storage_params: &mut DynSystemParams<StorageParams<DT>>,
-		params: &DT::Params,
-	);
-}
-
-pub struct RequesterParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for RequesterParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynRequesterParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, RequesterParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait RequesterAPI<DT: DataType> {
-	fn pass_data(
-		&mut self,
-		requester_params: &mut DynRequesterParams<DT>,
-		params: &DT::Params,
-		dirty_state: DirtyState,
-		data: &DT::Data,
-	);
-	fn dirty_data(
-		&mut self,
-		requester_params: &mut DynRequesterParams<DT>,
-		params: &DT::Params,
-		last_clean_tick: u64,
-		diff: Option<&DT::Diff>,
-	);
-}
-
-// ============================ Impl ============================
-
-// Consuming API
+// ============================ Consuming API ============================
 
 #[bevy_trait_query::queryable]
 pub trait ConsumingNodeAPI<DT: DataType> {
@@ -65,7 +14,7 @@ pub trait ConsumingNodeAPI<DT: DataType> {
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
 }
 
-// Requester
+// ============================ Requester ============================
 
 #[derive(Resource)]
 pub struct RequesterBookkeeping<DT: DataType> {
@@ -118,7 +67,7 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 pub struct Requester<'w, 's, DT: DataType> {
 	requester: ResMut<'w, RequesterBookkeeping<DT>>,
 	storage: Single<'w, 's, One<&'static mut dyn StorageRequesterAPI<DT>>, With<IsResource>>,
-	storage_params: DynStorageParams<'w, 's, DT>,
+	storage_params: DynStorageRequesterParams<'w, 's, DT>,
 }
 
 impl<DT: DataType> Requester<'_, '_, DT> {
@@ -148,5 +97,19 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 		if used || waited {
 			self.storage.cancel(&mut self.storage_params, params);
 		}
+	}
+}
+
+pub trait BileRegisterSimpleConsumer {
+	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
+	where DT: DataType, C: Component + ConsumingNodeAPI<DT>;
+}
+
+
+impl BileRegisterSimpleConsumer for App {
+	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
+	where DT: DataType, C: Component + ConsumingNodeAPI<DT>,
+	{
+		self.register_component_as::<dyn ConsumingNodeAPI<DT>, C>().register_dyn_param::<RequesterParams<DT>, RequesterSystemParams<DT>>()
 	}
 }

@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::{Request, DataType, DirtyState};
-
-use crate::{simple_consuming, simple_producing};
+use crate::{DataType, DirtyState, Request};
+use crate::simple_api::{DynStorageFulfillerParams, DynStorageRequesterParams, StorageFulfillerAPI, StorageRequesterAPI};
 
 // ============================ Simple Storage ============================
 
@@ -25,16 +24,16 @@ impl<DT: DataType> Storage<DT> {
 	}
 }
 
-impl<DT: DataType> simple_consuming::StorageRequesterAPI<DT> for Storage<DT> {
+impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 	fn request(
 		&mut self,
-		_storage_params: &mut simple_consuming::DynStorageParams<DT>,
+		_storage_params: &mut DynStorageRequesterParams<DT>,
 		_request: Request<DT>,
 	) -> Option<DT::Data>  { todo!() }
 
 	fn cancel(
 		&mut self,
-		_storage_params: &mut simple_consuming::DynStorageParams<DT>,
+		_storage_params: &mut DynStorageRequesterParams<DT>,
 		_params: &DT::Params,
 	) { todo!() }
 
@@ -45,10 +44,10 @@ impl<DT: DataType> simple_consuming::StorageRequesterAPI<DT> for Storage<DT> {
 	// fn release(&mut self, params: &DT::Params) -> bool { self.data.remove(params).is_some() }
 }
 
-impl<DT: DataType> simple_producing::StorageFulfillerAPI<DT> for Storage<DT> {
+impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 	fn pass_data(
 		&mut self,
-		_storage_params: &mut simple_producing::DynStorageParams<DT>,
+		_storage_params: &mut DynStorageFulfillerParams<DT>,
 		_params: &DT::Params,
 		_tick: u64,
 		_data: DT::Data,
@@ -56,7 +55,7 @@ impl<DT: DataType> simple_producing::StorageFulfillerAPI<DT> for Storage<DT> {
 
 	fn dirty_data(
 		&mut self,
-		_storage_params: &mut simple_producing::DynStorageParams<DT>,
+		_storage_params: &mut DynStorageFulfillerParams<DT>,
 		_params: &DT::Params,
 		_last_clean_tick: u64,
 		_diff: Option<&DT::Diff>,

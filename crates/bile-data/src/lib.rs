@@ -3,10 +3,10 @@
 pub mod setup;
 pub mod diff;
 pub mod dyn_system_params;
+pub mod simple_api;
 pub mod simple_consuming;
 pub mod simple_producing;
 pub mod simple_storage;
-pub mod simple_impl;
 // pub mod streaming_consuming;
 // pub mod streaming_producing;
 // pub mod streaming;

@@ -1,68 +1,10 @@
-use std::marker::PhantomData;
-
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
-use bevy_trait_query::One;
+use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
+use crate::{DataType, DirtyState, Request};
+use crate::simple_api::{DynStorageFulfillerParams, StorageFulfillerAPI};
 
-// ============================ API ============================
-
-pub struct StorageParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for StorageParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynStorageParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, StorageParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait StorageFulfillerAPI<DT: DataType> {
-	fn pass_data(
-		&mut self,
-		storage_params: &mut DynStorageParams<DT>,
-		params: &DT::Params,
-		tick: u64,
-		data: DT::Data,
-	);
-	fn dirty_data(
-		&mut self,
-		storage_params: &mut DynStorageParams<DT>,
-		params: &DT::Params,
-		last_clean_tick: u64,
-		diff: Option<&DT::Diff>,
-	);
-}
-
-pub struct FulfillerParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for FulfillerParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynFulfillerParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, FulfillerParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait FulfillerAPI<DT: DataType> {
-	fn cost(
-		&self,
-		fulfiller_params: &mut DynFulfillerParams<DT>,
-		request: &Request<DT>,
-	) -> Option<f32>; // None if the node can not fulfill the request
-	fn request(
-		&mut self,
-		fulfiller_params: &mut DynFulfillerParams<DT>,
-		request: Request<DT>,
-	);
-	fn drop(
-		&mut self,
-		fulfiller_params: &mut DynFulfillerParams<DT>,
-		params: &DT::Params,
-	);
-}
-
-// ============================ Impl ============================
-
-// Producing API
+// ============================ Producing API ============================
 
 #[bevy_trait_query::queryable]
 pub trait ProducingNodeAPI<DT: DataType> {
@@ -71,11 +13,13 @@ pub trait ProducingNodeAPI<DT: DataType> {
 	fn drop(&mut self, params: &DT::Params);
 }
 
+// ============================ Data Passer ============================
+
 // TODO: Redo all this
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
 	_storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
-	_storage_params: DynStorageParams<'w, 's, DT>,
+	_storage_params: DynStorageFulfillerParams<'w, 's, DT>,
 }
 
 impl<DT: DataType> DataPasser<'_, '_, DT> {
@@ -95,6 +39,8 @@ impl<DT: DataType> DataPasser<'_, '_, DT> {
 		// }
 	}
 }
+// ============================ Data Dirtier ============================
+
 
 // #[derive(SystemParam)]
 // pub struct DataDirtier<'w, 's, DT: DataType> {
@@ -119,3 +65,18 @@ impl<DT: DataType> DataPasser<'_, '_, DT> {
 // 		}
 // 	}
 // }
+
+pub trait BileRegisterSimpleProducer {
+	fn register_producer_simple<DT, C>(&mut self) -> &mut Self
+	where DT: DataType, C: Component + ProducingNodeAPI<DT>;
+}
+
+
+impl BileRegisterSimpleProducer for App {
+	fn register_producer_simple<DT, C>(&mut self) -> &mut Self
+	where DT: DataType, C: Component + ProducingNodeAPI<DT>,
+	{
+		self.register_component_as::<dyn ProducingNodeAPI<DT>, C>()
+		// .init_data_part::<DT, Fullfuller<DT, StreamStorage<DT>>>()
+	}
+}
