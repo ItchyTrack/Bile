@@ -1,3 +1,5 @@
+#![allow(type_alias_bounds)]
+
 pub mod setup;
 pub mod diff;
 pub mod dyn_system_params;

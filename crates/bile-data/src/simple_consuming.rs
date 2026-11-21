@@ -89,12 +89,12 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 	) {
 		let Some(waiting) = self.waiting.get_mut(params) else { return; };
 		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
-		waiting.extract_if(|&entity, wanted_dirty_state| {
-			if !dirty_state.satisfies(wanted_dirty_state) { return false; }
-			let Ok(mut node) = consuming_nodes.get_mut(entity) else { return true; };
+		waiting.retain(|&entity, wanted_dirty_state| {
+			if !dirty_state.satisfies(wanted_dirty_state) { return true; }
+			let Ok(mut node) = consuming_nodes.get_mut(entity) else { return false; };
 			self.usages.entry(params.clone()).or_default().insert(entity);
 			node.pass_data(params, dirty_state, data);
-			true
+			false
 		});
 	}
 

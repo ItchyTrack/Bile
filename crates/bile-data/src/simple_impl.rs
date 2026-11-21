@@ -1,4 +1,7 @@
 use bevy::prelude::*;
+use bevy_trait_query::RegisterExt;
+
+use crate::simple_consuming::RequesterParams;
 
 pub use crate::{
 	DataType,
@@ -25,7 +28,7 @@ impl BileRegisterSimple for App {
 	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
 	where DT: DataType, C: Component + ConsumingNodeAPI<DT>,
 	{
-		self.register_component_as::<dyn ConsumingNodeAPI<DT>, C>().register_dyn_param::<RequesterSystemParams>()
+		self.register_component_as::<dyn ConsumingNodeAPI<DT>, C>().register_dyn_param::<RequesterParams<DT>, RequesterSystemParams<DT>>()
 		// .init_data_part::<DT, StreamRequester<DT, StreamStorage<DT>>>()
 	}
 }

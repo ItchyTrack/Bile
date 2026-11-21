@@ -74,12 +74,12 @@ pub trait ProducingNodeAPI<DT: DataType> {
 // TODO: Redo all this
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
-	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
-	storage_params: DynStorageParams<'w, 's, DT>,
+	_storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
+	_storage_params: DynStorageParams<'w, 's, DT>,
 }
 
 impl<DT: DataType> DataPasser<'_, '_, DT> {
-	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
+	pub fn pass_data(&mut self, _source_entity: Entity, _params: &DT::Params, _dirty_state: DirtyState, _data: DT::Data) {
 
 
 		// let Ok(mut storage) = self.parts.single_mut() else { return; };

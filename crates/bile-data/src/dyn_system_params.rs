@@ -29,7 +29,7 @@ impl<K: ?Sized + 'static> Default for DynParamRegistry<K> {
 struct ParamState<P: SystemParam>(P::State);
 
 // The state of a param whose type is only known to the type that registered it.
-trait ErasedParamState: Any + Send + Sync {
+pub trait ErasedParamState: Any + Send + Sync {
 	fn init_access(&self, system_meta: &mut SystemMeta, system_access: &mut SystemAccess, world: &mut World);
 	fn apply(&mut self, system_meta: &SystemMeta, world: &mut World);
 	fn queue(&mut self, system_meta: &SystemMeta, world: DeferredWorld);
@@ -113,22 +113,22 @@ unsafe impl<K: ?Sized + 'static> SystemParam for DynSystemParams<'_, '_, K> {
 	// Like a `ParamSet`, only one of the params is used at a time. So each of them can conflict with the other params of
 	// the system, but not with each other.
 	fn init_access(state: &Self::State, system_meta: &mut SystemMeta, system_access: &mut SystemAccess, world: &mut World) {
-		for (_, state) in &state.0 {
+		for (_, state) in state.iter() {
 			state.init_access(system_meta, &mut system_access.clone(), world);
 		}
-		for (_, state) in &state.0 {
+		for (_, state) in state.iter() {
 			let mut param_access = SystemAccess::default();
 			state.init_access(system_meta, &mut param_access, world);
 			system_access.extend(param_access);
 		}
 	}
 	fn apply(state: &mut Self::State, system_meta: &SystemMeta, world: &mut World) {
-		for (_, state) in &mut state.0 {
+		for (_, state) in state.iter_mut() {
 			state.apply(system_meta, world);
 		}
 	}
 	fn queue(state: &mut Self::State, system_meta: &SystemMeta, mut world: DeferredWorld) {
-		for (_, state) in &mut state.0 {
+		for (_, state) in state.iter_mut() {
 			state.queue(system_meta, world.reborrow());
 		}
 	}
@@ -139,10 +139,10 @@ unsafe impl<K: ?Sized + 'static> SystemParam for DynSystemParams<'_, '_, K> {
 		change_tick: Tick,
 	) -> Result<Self::Item<'w, 's>, SystemParamValidationError> {
 		// Validated eagerly, like `DynSystemParam`, so the system is skipped when a param is unavailable.
-		for (_, state) in &mut state.0 {
+		for (_, state) in state.iter_mut() {
 			// SAFETY: Upheld by the caller.
 			unsafe { state.validate(system_meta, world, change_tick) }?;
 		}
-		Ok(DynSystemParams { states: &mut state.0, world, system_meta: system_meta.clone(), change_tick, _marker: PhantomData })
+		Ok(DynSystemParams { states: state, world, system_meta: system_meta.clone(), change_tick, _marker: PhantomData })
 	}
 }
