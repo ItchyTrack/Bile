@@ -49,7 +49,7 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 		&mut self,
 		_storage_params: &mut DynStorageFulfillerParams<DT>,
 		_params: &DT::Params,
-		_tick: u64,
+		_dirty_state: DirtyState,
 		_data: DT::Data,
 	) { todo!() }
 
