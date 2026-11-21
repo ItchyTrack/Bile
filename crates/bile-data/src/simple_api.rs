@@ -102,9 +102,11 @@ pub trait FulfillerAPI<DT: DataType> {
 		fulfiller_params: &mut DynFulfillerParams<DT>,
 		request: Request<DT>,
 	);
-	fn drop(
+	fn cancel(
 		&mut self,
 		fulfiller_params: &mut DynFulfillerParams<DT>,
 		params: &DT::Params,
+		latest: DirtyState,
+		oldest: Option<u64>, // None if everything before latest
 	);
 }

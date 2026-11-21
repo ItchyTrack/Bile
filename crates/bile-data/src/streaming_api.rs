@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::{DataType, Request, dyn_system_params::DynSystemParams};
+use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
@@ -85,6 +85,8 @@ pub trait StorageRequesterAPI<DT: DataType> {
 		&mut self,
 		storage_params: &mut DynSystemParams<StorageRequesterParams<DT>>,
 		params: &DT::Params,
+		latest: DirtyState,
+		oldest: Option<u64>, // None if everything before latest
 	);
 }
 

@@ -85,17 +85,17 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 	}
 	pub fn cancel(&mut self, requester_node: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) {
 		let used = self.requester.usages.get_mut(params).map_or_default(|usages| 'ret: {
-			let Some(&dirty_state) = usages.get(&requester_node) else { break 'ret false; };
-			if dirty_state > latest || matches!((dirty_state, oldest), (DirtyState::Dirty { tick }, Some(oldest)) if tick < oldest) { break 'ret false; }
+			let Some(&dirty_state) = usages.get(&requester_node) else { break 'ret 0; };
+			if dirty_state > latest || matches!((dirty_state, oldest), (DirtyState::Dirty { tick }, Some(oldest)) if tick < oldest) { break 'ret 0; }
 			if usages.len() == 1 {
-				self.requester.usages.remove(params);
-				break 'ret false;
+				break 'ret -1;
 			}
 			usages.remove(&requester_node);
-			true
+			1
 		});
+		if used == -1 { self.requester.usages.remove(params); }
 		let waited = self.requester.waiting.get_mut(params).map_or_default(|waiting| 'ret: {
-			let Some(entity_waiting) = waiting.0.get_mut(&requester_node) else { break 'ret false; };
+			let Some(mut entity_waiting) = waiting.0.get_mut(&requester_node) else { break 'ret 0; };
 			let to_remove = if let Some(oldest) = oldest {
 				btree_drain::set_drain_range(&mut entity_waiting, DirtyState::Dirty { tick: oldest }..=latest)
 			} else {
@@ -103,17 +103,18 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 			};
 			if entity_waiting.is_empty() {
 				if waiting.0.len() == 1 {
-					self.requester.waiting.remove(params);
-					break 'ret false;
+
+					break 'ret -1;
 				}
 				waiting.0.remove(&requester_node);
 			}
 			for dirty_state in to_remove {
 				waiting.1.get_mut(&dirty_state).expect("It was in waiting.0 and so should be in waiting.1").remove(&requester_node);
 			}
-			true
+			1
 		});
-		if used || waited {
+		if waited == -1 { self.requester.waiting.remove(params); }
+		if used == 1 || waited == 1 {
 			self.storage.cancel(&mut self.storage_params, params, latest, oldest);
 		}
 	}
