@@ -17,12 +17,14 @@ pub trait StorageRequesterAPI<DT: DataType> {
 	fn request(
 		&mut self,
 		storage_params: &mut DynSystemParams<StorageRequesterParams<DT>>,
-		request: Request<DT>,
-	) -> Option<DT::Data>;
+		request: &Request<DT>,
+	) -> Option<(DT::Data, DirtyState)>;
 	fn cancel(
 		&mut self,
 		storage_params: &mut DynSystemParams<StorageRequesterParams<DT>>,
 		params: &DT::Params,
+		latest: DirtyState,
+		oldest: Option<u64>, // None if everything before latest
 	);
 }
 

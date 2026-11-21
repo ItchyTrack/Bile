@@ -1,9 +1,9 @@
-use std::{collections::{HashMap, HashSet}, marker::PhantomData};
+use std::{collections::{BTreeMap, HashMap, HashSet}, marker::PhantomData, ops::Bound::{Included, Unbounded}};
 
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{btree_drain, DataType, DirtyState, Request, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::simple_api::{DynRequesterParams, DynStorageRequesterParams, RequesterAPI, RequesterParams, StorageRequesterAPI};
 
 // ============================ Consuming API ============================
@@ -18,8 +18,8 @@ pub trait ConsumingNodeAPI<DT: DataType> {
 
 #[derive(Resource)]
 pub struct RequesterBookkeeping<DT: DataType> {
-	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
-	usages: HashMap<DT::Params, HashSet<Entity>>,
+	waiting: HashMap<DT::Params, (HashMap<Entity, HashSet<DirtyState>>, BTreeMap<DirtyState, HashSet<Entity>>)>,
+	usages: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
 }
 
 pub struct RequesterSystemParams<DT: DataType>(PhantomData<DT>);
@@ -38,13 +38,14 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 	) {
 		let Some(waiting) = self.waiting.get_mut(params) else { return; };
 		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
-		waiting.retain(|&entity, &mut wanted_dirty_state| {
-			if !dirty_state.satisfies(wanted_dirty_state) { return true; }
-			let Ok(mut node) = consuming_nodes.get_mut(entity) else { return false; };
-			self.usages.entry(params.clone()).or_default().insert(entity);
-			node.pass_data(params, dirty_state, data);
-			false
-		});
+		for (_, entities) in btree_drain::drain_range(&mut waiting.1, ..=dirty_state) {
+			for entity in entities {
+				waiting.0.get_mut(&entity).expect("It was in waiting.1 and so should be in waiting.0").remove(&dirty_state);
+				let Ok(mut node) = consuming_nodes.get_mut(entity) else { continue; };
+				self.usages.entry(params.clone()).or_default().insert(entity, dirty_state);
+				node.pass_data(params, dirty_state, data);
+			}
+		}
 	}
 
 	fn dirty_data(
@@ -54,9 +55,10 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 		last_clean_tick: u64,
 		diff: Option<&DT::Diff>,
 	) {
-		let Some(usages) = self.usages.get(params) else { return; };
+		let Some(usages) = self.usages.get_mut(params) else { return; };
 		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
-		for &usage in usages {
+		for (&usage, dirty_state) in usages {
+			if matches!(dirty_state, DirtyState::UpToDate) { *dirty_state = DirtyState::Dirty { tick: last_clean_tick }; }
 			let Ok(mut node) = consuming_nodes.get_mut(usage) else { continue; };
 			node.dirty_data(params, last_clean_tick, diff);
 		}
@@ -71,17 +73,20 @@ pub struct Requester<'w, 's, DT: DataType> {
 }
 
 impl<DT: DataType> Requester<'_, '_, DT> {
-	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> Option<DT::Data> {
-		if let Some(data) = self.storage.request(&mut self.storage_params, request.clone()) {
-			self.requester.usages.entry(request.params).or_default().insert(requester_node);
+	pub fn request(&mut self, requester_node: Entity, request: &Request<DT>) -> Option<(DT::Data, DirtyState)> {
+		if let Some(data) = self.storage.request(&mut self.storage_params, request) {
+			self.requester.usages.entry(request.params.clone()).or_default().insert(requester_node, request.allowed_tick);
 			return Some(data);
 		}
-		self.requester.waiting.entry(request.params).or_default().insert(requester_node, request.allowed_tick);
+		let waiting = self.requester.waiting.entry(request.params.clone()).or_default();
+		waiting.0.entry(requester_node).or_default().insert(request.allowed_tick);
+		waiting.1.entry(request.allowed_tick).or_default().insert(requester_node);
 		None
 	}
-	pub fn cancel(&mut self, params: &DT::Params, requester_node: Entity) {
+	pub fn cancel(&mut self, requester_node: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) {
 		let used = if let Some(usages) = self.requester.usages.get_mut(params) {
-			usages.remove(&requester_node);
+			if usages.get(&requester_node). { return false; }
+
 			if usages.is_empty() {
 				self.requester.usages.remove(params);
 				false
@@ -95,7 +100,7 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 			} else { true }
 		} else { false };
 		if used || waited {
-			self.storage.cancel(&mut self.storage_params, params);
+			self.storage.cancel(&mut self.storage_params, params, latest, oldest);
 		}
 	}
 }

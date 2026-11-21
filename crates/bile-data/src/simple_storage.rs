@@ -28,13 +28,15 @@ impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 	fn request(
 		&mut self,
 		_storage_params: &mut DynStorageRequesterParams<DT>,
-		_request: Request<DT>,
-	) -> Option<DT::Data>  { todo!() }
+		_request: &Request<DT>,
+	) -> Option<(DT::Data, DirtyState)>  { todo!() }
 
 	fn cancel(
 		&mut self,
 		_storage_params: &mut DynStorageRequesterParams<DT>,
 		_params: &DT::Params,
+		_latest: DirtyState,
+		_oldest: Option<u64>, // None if everything before latest
 	) { todo!() }
 
 	// type Param = ();

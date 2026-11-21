@@ -8,6 +8,7 @@ pub mod simple_consuming;
 pub mod simple_producing;
 pub mod simple_storage;
 pub mod streaming_api;
+pub mod btree_drain;
 // pub mod streaming_consuming;
 // pub mod streaming_producing;
 // pub mod streaming;
