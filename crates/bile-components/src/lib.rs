@@ -8,7 +8,7 @@ use bevy::{
 	prelude::*,
 };
 use bile_data::{
-	BileDataParts, BileDataSchedule, BileDataSystemSet, DataPart, DataType, DirtyState, Request, Storage,
+	BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request
 	simple::{self, Fulfillers, Requester, Requests, SimpleFulfiller, SimpleFulfillerStorage, SimpleRequester, SimpleRequesterStorage},
 };
 
