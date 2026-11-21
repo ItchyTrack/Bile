@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, HashMap, HashSet}, marker::PhantomData, ops::Bound::{Included, Unbounded}};
+use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, marker::PhantomData};
 
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
@@ -18,7 +18,7 @@ pub trait ConsumingNodeAPI<DT: DataType> {
 
 #[derive(Resource)]
 pub struct RequesterBookkeeping<DT: DataType> {
-	waiting: HashMap<DT::Params, (HashMap<Entity, HashSet<DirtyState>>, BTreeMap<DirtyState, HashSet<Entity>>)>,
+	waiting: HashMap<DT::Params, (HashMap<Entity, BTreeSet<DirtyState>>, BTreeMap<DirtyState, HashSet<Entity>>)>,
 	usages: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
 }
 
@@ -84,21 +84,35 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 		None
 	}
 	pub fn cancel(&mut self, requester_node: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) {
-		let used = if let Some(usages) = self.requester.usages.get_mut(params) {
-			if usages.get(&requester_node). { return false; }
-
-			if usages.is_empty() {
+		let used = self.requester.usages.get_mut(params).map_or_default(|usages| 'ret: {
+			let Some(&dirty_state) = usages.get(&requester_node) else { break 'ret false; };
+			if dirty_state > latest || matches!((dirty_state, oldest), (DirtyState::Dirty { tick }, Some(oldest)) if tick < oldest) { break 'ret false; }
+			if usages.len() == 1 {
 				self.requester.usages.remove(params);
-				false
-			} else { true }
-		} else { false };
-		let waited = if let Some(waiting) = self.requester.waiting.get_mut(params) {
-			waiting.remove(&requester_node);
-			if waiting.is_empty() {
-				self.requester.waiting.remove(params);
-				false
-			} else { true }
-		} else { false };
+				break 'ret false;
+			}
+			usages.remove(&requester_node);
+			true
+		});
+		let waited = self.requester.waiting.get_mut(params).map_or_default(|waiting| 'ret: {
+			let Some(entity_waiting) = waiting.0.get_mut(&requester_node) else { break 'ret false; };
+			let to_remove = if let Some(oldest) = oldest {
+				btree_drain::set_drain_range(&mut entity_waiting, DirtyState::Dirty { tick: oldest }..=latest)
+			} else {
+				entity_waiting.split_off(&latest)
+			};
+			if entity_waiting.is_empty() {
+				if waiting.0.len() == 1 {
+					self.requester.waiting.remove(params);
+					break 'ret false;
+				}
+				waiting.0.remove(&requester_node);
+			}
+			for dirty_state in to_remove {
+				waiting.1.get_mut(&dirty_state).expect("It was in waiting.0 and so should be in waiting.1").remove(&requester_node);
+			}
+			true
+		});
 		if used || waited {
 			self.storage.cancel(&mut self.storage_params, params, latest, oldest);
 		}
