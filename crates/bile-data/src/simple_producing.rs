@@ -1,6 +1,9 @@
 use std::marker::PhantomData;
 
-use crate::{DataType, Request, dyn_system_params::DynSystemParams};
+use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy_trait_query::One;
+
+use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
 
 // ============================ API ============================
 
@@ -69,26 +72,29 @@ pub trait ProducingNodeAPI<DT: DataType> {
 }
 
 // TODO: Redo all this
-// #[derive(SystemParam)]
-// pub struct DataPasser<'w, 's, DT: DataType> {
-// 	parts: Query<'w, 's, (One<&'static mut dyn DataStorage<DT>>, All<&'static mut dyn ErasedFulfiller<DT>>)>,
-// }
+#[derive(SystemParam)]
+pub struct DataPasser<'w, 's, DT: DataType> {
+	storage: ResMut<'w, One<&'static mut dyn StorageFulfillerAPI<DT>>>,
+	storage_params: DynStorageParams<'w, 's, DT>,
+}
 
-// impl<DT: DataType> DataPasser<'_, '_, DT> {
-// 	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
-// 		let Ok((mut storage, fulfillers)) = self.parts.single_mut() else { return; };
-// 		let mut fulfillers: Vec<_> = fulfillers.into_iter().collect();
-// 		// Only the fulfiller that asked the node gets the data. If it stored it, the data no longer comes from the others.
-// 		let Some(source) = fulfillers.iter().position(|fulfiller| fulfiller.is_source(params, source_entity)) else { return; };
-// 		if fulfillers[source].pass_data(&mut *storage, source_entity, params, dirty_state, data) {
-// 			for (index, fulfiller) in fulfillers.iter_mut().enumerate() {
-// 				if index != source {
-// 					fulfiller.release(&mut *storage, params);
-// 				}
-// 			}
-// 		}
-// 	}
-// }
+impl<DT: DataType> DataPasser<'_, '_, DT> {
+	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
+
+
+		// let Ok(mut storage) = self.parts.single_mut() else { return; };
+		// let mut fulfillers: Vec<_> = fulfillers.into_iter().collect();
+		// // Only the fulfiller that asked the node gets the data. If it stored it, the data no longer comes from the others.
+		// let Some(source) = fulfillers.iter().position(|fulfiller| fulfiller.is_source(params, source_entity)) else { return; };
+		// if fulfillers[source].pass_data(&mut *storage, source_entity, params, dirty_state, data) {
+		// 	for (index, fulfiller) in fulfillers.iter_mut().enumerate() {
+		// 		if index != source {
+		// 			fulfiller.release(&mut *storage, params);
+		// 		}
+		// 	}
+		// }
+	}
+}
 
 // #[derive(SystemParam)]
 // pub struct DataDirtier<'w, 's, DT: DataType> {

@@ -2,23 +2,6 @@ use std::{hash::Hash, sync::atomic::{AtomicU64, Ordering}};
 
 use bevy::{app::MainScheduleOrder, ecs::schedule::ScheduleLabel, prelude::*};
 
-pub trait DataType: 'static {
-	type Params: Clone + Hash + PartialEq + Eq + Send + Sync + 'static;
-	type Data: Clone + Send + Sync + 'static;
-	type Diff: Clone + Send + Sync + 'static;
-}
-
-pub struct Request<DT: DataType> {
-	pub params: DT::Params,
-	pub allowed_tick: DirtyState, // UpToDate -> Only up to date data; Dirty(tick) -> Reject data before tick
-}
-
-impl<DT: DataType> Request<DT> {
-	pub fn new(params: DT::Params, allowed_tick: DirtyState) -> Self {
-		Self { params, allowed_tick }
-	}
-}
-
 #[derive(Resource, Default)]
 pub struct StateTick {
 	current_tick: AtomicU64, // atomic so that everything that dirties can update it
@@ -57,6 +40,23 @@ impl DirtyState {
 			(_, DirtyState::UpToDate) => false,
 			(DirtyState::Dirty { tick: a }, DirtyState::Dirty { tick: b }) => a > b,
 		}
+	}
+}
+
+pub trait DataType: 'static {
+	type Params: Clone + Hash + PartialEq + Eq + Send + Sync + 'static;
+	type Data: Clone + Send + Sync + 'static;
+	type Diff: Clone + Send + Sync + 'static;
+}
+
+pub struct Request<DT: DataType> {
+	pub params: DT::Params,
+	pub allowed_tick: DirtyState, // UpToDate -> Only up to date data; Dirty(tick) -> Reject data before tick
+}
+
+impl<DT: DataType> Request<DT> {
+	pub fn new(params: DT::Params, allowed_tick: DirtyState) -> Self {
+		Self { params, allowed_tick }
 	}
 }
 

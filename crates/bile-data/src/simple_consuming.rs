@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_trait_query::One;
 
-use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
+use crate::{DataType, DirtyState, Request, dyn_system_params::{DynParam, DynSystemParams}};
 
 // ============================ API ============================
 
@@ -43,8 +43,8 @@ pub trait RequesterAPI<DT: DataType> {
 		&mut self,
 		requester_params: &mut DynRequesterParams<DT>,
 		params: &DT::Params,
-		tick: u64,
-		data: DT::Data,
+		dirty_state: &DirtyState,
+		data: &DT::Data,
 	);
 	fn dirty_data(
 		&mut self,
@@ -61,7 +61,7 @@ pub trait RequesterAPI<DT: DataType> {
 
 #[bevy_trait_query::queryable]
 pub trait ConsumingNodeAPI<DT: DataType> {
-	fn pass_data(&mut self, params: &DT::Params, tick: u64, data: DT::Data);
+	fn pass_data(&mut self, params: &DT::Params, dirty_state: &DirtyState, data: &DT::Data);
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
 }
 
@@ -69,8 +69,13 @@ pub trait ConsumingNodeAPI<DT: DataType> {
 
 pub struct RequesterBookkeeping<DT: DataType> {
 	waiting: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
-	finished: HashMap<DT::Params, HashSet<Entity>>,
 	usages: HashMap<DT::Params, HashSet<Entity>>,
+}
+
+pub struct RequesterSystemParams<DT: DataType>;
+
+impl<'w, 's, DT: DataType> DynParam<RequesterParams<DT>> for RequesterSystemParams<DT> {
+	type Param = Query<'w, 's, One<&'static mut dyn ConsumingNodeAPI<DT>>>;
 }
 
 impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
@@ -78,9 +83,19 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 		&mut self,
 		requester_params: &mut DynRequesterParams<DT>,
 		params: &DT::Params,
-		tick: u64,
-		data: DT::Data,
-	) { todo!() }
+		dirty_state: &DirtyState,
+		data: &DT::Data,
+	) {
+		let Some(waiting) = self.waiting.get(params) else { return; };
+		let consuming_nodes = requester_params.get::<RequesterSystemParams>();
+		waiting.extract_if(|(&entity, wanted_dirty_state)| {
+			if !dirty_state.satisfies(wanted_dirty_state) { return false; }
+			let Ok(mut node) = consuming_nodes.get(entity) else { return true; };
+			self.usages.entry(params.clone()).or_default().insert(entity);
+			node.pass_data(params, dirty_state, data);
+			true
+		});
+	}
 
 	fn dirty_data(
 		&mut self,
@@ -88,7 +103,14 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 		params: &DT::Params,
 		last_clean_tick: u64,
 		diff: Option<&DT::Diff>,
-	) { todo!() }
+	) {
+		let Some(usages) = self.usages.get(params) else { return; };
+		let consuming_nodes = requester_params.get::<RequesterSystemParams>();
+		for &usage in usages {
+			let Ok(mut node) = consuming_nodes.get(usage) else { continue; };
+			node.dirty_data(params, last_clean_tick, diff);
+		}
+	}
 }
 
 // impl RegisterDynParam for RequesterBookkeeping so storage can query them so pass data can go strait to Consumers
