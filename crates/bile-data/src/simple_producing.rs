@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::One;
 
 use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
@@ -74,7 +74,7 @@ pub trait ProducingNodeAPI<DT: DataType> {
 // TODO: Redo all this
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
-	storage: ResMut<'w, One<&'static mut dyn StorageFulfillerAPI<DT>>>,
+	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
 	storage_params: DynStorageParams<'w, 's, DT>,
 }
 
