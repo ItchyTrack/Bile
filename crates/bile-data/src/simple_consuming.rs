@@ -43,7 +43,7 @@ pub trait RequesterAPI<DT: DataType> {
 		&mut self,
 		requester_params: &mut DynRequesterParams<DT>,
 		params: &DT::Params,
-		dirty_state: &DirtyState,
+		dirty_state: DirtyState,
 		data: &DT::Data,
 	);
 	fn dirty_data(
@@ -61,7 +61,7 @@ pub trait RequesterAPI<DT: DataType> {
 
 #[bevy_trait_query::queryable]
 pub trait ConsumingNodeAPI<DT: DataType> {
-	fn pass_data(&mut self, params: &DT::Params, dirty_state: &DirtyState, data: &DT::Data);
+	fn pass_data(&mut self, params: &DT::Params, dirty_state: DirtyState, data: &DT::Data);
 	fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>);
 }
 
@@ -84,12 +84,12 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 		&mut self,
 		requester_params: &mut DynRequesterParams<DT>,
 		params: &DT::Params,
-		dirty_state: &DirtyState,
+		dirty_state: DirtyState,
 		data: &DT::Data,
 	) {
 		let Some(waiting) = self.waiting.get_mut(params) else { return; };
 		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
-		waiting.retain(|&entity, wanted_dirty_state| {
+		waiting.retain(|&entity, &mut wanted_dirty_state| {
 			if !dirty_state.satisfies(wanted_dirty_state) { return true; }
 			let Ok(mut node) = consuming_nodes.get_mut(entity) else { return false; };
 			self.usages.entry(params.clone()).or_default().insert(entity);

@@ -25,15 +25,15 @@ pub enum DirtyState {
 }
 
 impl DirtyState {
-	pub fn satisfies(&self, required: &DirtyState) -> bool {
+	pub fn satisfies(self, required: DirtyState) -> bool {
 		match (self, required) {
 			(DirtyState::UpToDate, _) => true,
 			(_, DirtyState::UpToDate) => false,
-			(DirtyState::Dirty { tick: have }, DirtyState::Dirty { tick: need }) => *have >= *need,
+			(DirtyState::Dirty { tick: have }, DirtyState::Dirty { tick: need }) => have >= need,
 		}
 	}
 
-	pub fn is_fresher_than(&self, other: &DirtyState) -> bool {
+	pub fn is_fresher_than(self, other: DirtyState) -> bool {
 		match (self, other) {
 			(DirtyState::UpToDate, DirtyState::UpToDate) => false,
 			(DirtyState::UpToDate, _) => true,
@@ -62,7 +62,7 @@ impl<DT: DataType> Request<DT> {
 
 impl<DT: DataType> Clone for Request<DT> {
 	fn clone(&self) -> Self {
-		Self { params: self.params.clone(), allowed_tick: self.allowed_tick.clone() }
+		Self { params: self.params.clone(), allowed_tick: self.allowed_tick }
 	}
 }
 

@@ -67,7 +67,7 @@ impl<DT: DataType> simple_producing::StorageFulfillerAPI<DT> for Storage<DT> {
 	// fn data(&self, _param: &(), params: &DT::Params) -> Option<(DirtyState, DT::Data)> { self.get(params) }
 	// fn dirty_state(&self, params: &DT::Params) -> Option<DirtyState> { self.data.get(params).map(|(dirty_state, _)| *dirty_state) }
 	// fn wanted(&self, params: &DT::Params) -> bool { self.requests.is_waiting(params) }
-	// fn is_requested(&self, params: &DT::Params, allowed_tick: &DirtyState) -> bool { self.requests.is_waiting_for(params, allowed_tick) }
+	// fn is_requested(&self, params: &DT::Params, allowed_tick: DirtyState) -> bool { self.requests.is_waiting_for(params, allowed_tick) }
 	// fn store(&mut self, params: &DT::Params, dirty_state: DirtyState, data: Option<DT::Data>) {
 	// 	if data.is_some() {
 	// 		self.requests.stored(params, dirty_state);
