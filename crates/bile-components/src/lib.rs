@@ -192,20 +192,25 @@ impl<DT: ComponentData> StorageRequesterAPI<DT> for ComponentStorage<DT> {
 		requester: Entity,
 		request: &Request<DT>,
 	) -> Option<(DT::Data, DirtyState)> {
-		self.requests.request(requester, request);
 		let (mut fulfillers, components) = storage_params.get::<ComponentRequesterSystemParams<DT>>();
 		let stored = self.get(&components, &request.params);
 		if let Some((dirty_state, data)) = &stored && *dirty_state >= request.allowed_tick {
+			self.requests.request(requester, request, true);
 			return Some((data.clone(), *dirty_state));
 		}
-		if self.requests.is_in_flight(request) { return None; }
+		if self.requests.is_in_flight(request) {
+			self.requests.request(requester, request, false);
+			return None;
+		}
 		let stale = stored.and_then(|(_, data)| Some((data, self.requests.diffs(&request.params)?)));
-		let Some(data) = fulfillers.request(request.clone(), stale) else {
+		let applied = fulfillers.request(request.clone(), stale);
+		self.requests.request(requester, request, applied.is_some());
+		let Some(data) = applied else {
 			self.requests.passed_on(request);
 			return None;
 		};
 		// The diffs were applied right away
-		self.requests.pass_data(&request.params, DirtyState::UpToDate);
+		self.requests.applied(&request.params);
 		self.store(&request.params, DirtyState::UpToDate, data.clone());
 		Some((data, DirtyState::UpToDate))
 	}
@@ -236,7 +241,7 @@ impl<DT: ComponentData> StorageFulfillerAPI<DT> for ComponentStorage<DT> {
 		dirty_state: DirtyState,
 		data: DT::Data,
 	) {
-		if !self.requests.is_requested(params) { return; }
+		if !self.requests.answered(params, dirty_state) { return; }
 		if self.entries.get(params).and_then(|entry| entry.stored.as_ref()).is_some_and(|(stored, _)| *stored > dirty_state) { return; }
 		// The wants are not requesters, they get the data at the end of the bile update
 		let requesters = self.requests.pass_data(params, dirty_state);
@@ -269,20 +274,26 @@ fn cancel_unwanted<DT: ComponentData>(mut storage: ResMut<ComponentStorage<DT>>,
 	}
 }
 
-// The wants keep their component up to date
-fn request_wanted<DT: ComponentData>(
-	mut storage: ResMut<ComponentStorage<DT>>,
-	mut storage_params: DynStorageRequesterParams<DT>,
-	wants: Query<(Entity, &Want<DT>), Added<Want<DT>>>,
-) {
-	let storage = &mut *storage;
-	for (entity, want) in &wants {
-		storage.want(&want.params, entity);
+fn pass_applied<DT: ComponentData>(mut storage: ResMut<ComponentStorage<DT>>, mut requesters: Requesters<DT>, components: Query<&DT::Component>) {
+	for params in storage.requests.take_applied() {
+		let Some((dirty_state, data)) = storage.get(&components, &params) else { continue; };
+		let satisfied = storage.requests.satisfied(&params, dirty_state);
+		requesters.pass_data(satisfied, &params, dirty_state, &data);
 	}
+}
+
+// The wants keep their component up to date
+fn request_wanted<DT: ComponentData>(mut storage: ResMut<ComponentStorage<DT>>, mut storage_params: DynStorageRequesterParams<DT>) {
+	let storage = &mut *storage;
 	for params in std::mem::take(&mut storage.unsatisfied) {
 		if storage.entries.get(&params).is_none_or(|entry| entry.wanting.is_empty()) { continue; }
 		storage.request(&mut storage_params, storage.entity, &Request::new(params, DirtyState::UpToDate));
 	}
+}
+
+// Right away, so a want that moves to another entity in the same frame keeps the data
+fn want_added<DT: ComponentData>(add: On<Add<Want<DT>>>, wants: Query<&Want<DT>>, mut storage: ResMut<ComponentStorage<DT>>) {
+	storage.want(&wants.get(add.entity).expect("It was just added").params, add.entity);
 }
 
 fn unwant_removed<DT: ComponentData>(
@@ -315,7 +326,7 @@ fn update_components<DT: ComponentData>(
 				(data, entry.wanting.iter().copied().collect())
 			}
 			// the entities that want it anew
-			Some((_, Location::Components)) => {
+			Some((DirtyState::UpToDate, Location::Components)) => {
 				let Some(&holder) = entry.holders.iter().next() else { continue; };
 				(components.get(holder).ok().cloned(), entry.wanting.difference(&entry.holders).copied().collect())
 			}
@@ -362,12 +373,14 @@ impl AddComponentData for App {
 			.register_component_as::<dyn StorageFulfillerAPI<DT>, ComponentStorage<DT>>()
 			.register_dyn_param::<StorageRequesterParams<DT>, ComponentRequesterSystemParams<DT>>()
 			.register_dyn_param::<StorageFulfillerParams<DT>, ComponentFulfillerSystemParams<DT>>()
+			.add_observer(want_added::<DT>)
 			.add_observer(unwant_removed::<DT>)
 			.add_systems(
 				BileDataSchedule,
 				(
 					cancel_unwanted::<DT>.in_set(BileDataSystemSet::Cancel),
 					request_wanted::<DT>.in_set(BileDataSystemSet::Request),
+					pass_applied::<DT>.in_set(BileDataSystemSet::PassData),
 					update_components::<DT>.in_set(BileDataSystemSet::Store),
 				),
 			)

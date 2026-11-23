@@ -135,6 +135,42 @@ fn dirty_component_is_requested_again_and_replaced() {
 }
 
 #[test]
+fn a_new_want_waits_for_up_to_date_data() {
+	let (mut app, source, entity) = setup();
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	app.update();
+	pass(&mut app, source, 3, Some(Value(30)));
+	app.update();
+	resolved(&mut app);
+	dirty(&mut app, None);
+	let other = app.world_mut().spawn_empty().id();
+	want::<Num>(&mut app.world_mut().entity_mut(other), 3);
+	app.update();
+	assert!(app.world().get::<Value>(other).is_none());
+	assert!(resolved(&mut app).is_empty());
+	pass(&mut app, source, 3, Some(Value(31)));
+	app.update();
+	assert_eq!(app.world().get::<Value>(other), Some(&Value(31)));
+	assert_eq!(resolved(&mut app), vec![other]);
+}
+
+#[test]
+fn moving_a_want_keeps_the_data() {
+	let (mut app, source, entity) = setup();
+	let other = app.world_mut().spawn_empty().id();
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	app.update();
+	pass(&mut app, source, 3, Some(Value(30)));
+	app.update();
+	unwant::<Num>(&mut app.world_mut().entity_mut(entity));
+	want::<Num>(&mut app.world_mut().entity_mut(other), 3);
+	app.update();
+	assert_eq!(app.world().get::<Value>(other), Some(&Value(30)));
+	assert_eq!(producer(&app, source).requests, vec![3]);
+	assert!(producer(&app, source).cancels.is_empty());
+}
+
+#[test]
 fn want_is_reference_counted() {
 	let (mut app, source, entity) = setup();
 	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);

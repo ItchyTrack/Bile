@@ -1,9 +1,9 @@
-use std::{collections::{BTreeSet, HashMap}, marker::PhantomData};
+use std::{collections::HashMap, marker::PhantomData};
 
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{btree_drain, cancel_range, DataType, DirtyState, Request, StateTick, diff::DiffFulfiller, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{unheld_ranges, Claim, DataType, DirtyState, Request, StateTick, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::simple_api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI};
 
 // ============================ Producing API ============================
@@ -30,7 +30,7 @@ fn best_node<DT: DataType>(producing_nodes: &Query<(Entity, One<&'static mut dyn
 
 #[derive(Resource)]
 pub struct FulfillerBookkeeping<DT: DataType> {
-	asked: HashMap<DT::Params, HashMap<Entity, BTreeSet<DirtyState>>>, // Params -> Producing node -> Requested dirty states that were not cancelled
+	asked: HashMap<DT::Params, (Claim, HashMap<Entity, Claim>)>, // Params -> What the storage holds here, Producing node -> What it was asked for
 }
 
 impl<DT: DataType> Default for FulfillerBookkeeping<DT> {
@@ -53,7 +53,9 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 	) {
 		let mut producing_nodes = fulfiller_params.get::<FulfillerSystemParams<DT>>();
 		let Some((_, entity)) = best_node(&producing_nodes, &request) else { return; };
-		self.asked.entry(request.params.clone()).or_default().entry(entity).or_default().insert(request.allowed_tick);
+		let (storage, nodes) = self.asked.entry(request.params.clone()).or_default();
+		storage.request(request.allowed_tick, false);
+		nodes.entry(entity).or_default().request(request.allowed_tick, false);
 		producing_nodes.get_mut(entity).expect("It was just found").1.request(request);
 	}
 
@@ -64,16 +66,22 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 		latest: DirtyState,
 		oldest: Option<u64>, // None if everything before latest
 	) {
-		let Some(asked) = self.asked.get_mut(params) else { return; };
+		let Some((storage, nodes)) = self.asked.get_mut(params) else { return; };
+		storage.cancel(latest, oldest);
 		let mut producing_nodes = fulfiller_params.get::<FulfillerSystemParams<DT>>();
-		asked.retain(|&entity, dirty_states| {
-			if btree_drain::set_drain_range(dirty_states, cancel_range(latest, oldest)).is_empty() { return true; }
-			if let Ok((_, mut node)) = producing_nodes.get_mut(entity) {
-				node.cancel(params, latest, oldest);
+		// The storage has one usage for the data of every node. So a node keeps its usage until the storage holds
+		// nothing here anymore, then every node is told to stop.
+		let released = storage.is_empty();
+		nodes.retain(|&entity, claim| {
+			let ranges = if released { vec![(DirtyState::UpToDate, None)] } else { unheld_ranges(claim.usage, latest, oldest) };
+			for (latest, oldest) in ranges {
+				if claim.cancel(latest, oldest) && let Ok((_, mut node)) = producing_nodes.get_mut(entity) {
+					node.cancel(params, latest, oldest);
+				}
 			}
-			!dirty_states.is_empty()
+			!claim.is_empty()
 		});
-		if asked.is_empty() { self.asked.remove(params); }
+		if released { self.asked.remove(params); }
 	}
 }
 
@@ -81,8 +89,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
-	fulfiller: Option<Res<'w, FulfillerBookkeeping<DT>>>,
-	diff_fulfiller: Option<ResMut<'w, DiffFulfiller<DT>>>,
+	fulfiller: Option<ResMut<'w, FulfillerBookkeeping<DT>>>,
 	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
 	storage_params: DynStorageFulfillerParams<'w, 's, DT>,
 }
@@ -90,9 +97,10 @@ pub struct DataPasser<'w, 's, DT: DataType> {
 impl<DT: DataType> DataPasser<'_, '_, DT> {
 	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
 		// Only from the nodes that were asked for the data
-		let asked = self.fulfiller.as_ref().is_some_and(|fulfiller| fulfiller.asked.get(params).is_some_and(|asked| asked.contains_key(&source_entity)));
-		let applied = self.diff_fulfiller.as_mut().is_some_and(|diff_fulfiller| diff_fulfiller.applied(source_entity, params, dirty_state));
-		if !asked && !applied { return; }
+		let Some((storage, nodes)) = self.fulfiller.as_mut().and_then(|fulfiller| fulfiller.asked.get_mut(params)) else { return; };
+		let Some(claim) = nodes.get_mut(&source_entity) else { return; };
+		claim.pass(dirty_state);
+		storage.pass(dirty_state);
 		self.storage.pass_data(&mut self.storage_params, params, dirty_state, data);
 	}
 }

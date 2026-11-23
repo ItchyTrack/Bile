@@ -1,6 +1,8 @@
-use std::{hash::Hash, ops::Bound};
+use std::{collections::BTreeSet, hash::Hash, ops::Bound};
 
 use bevy::{app::MainScheduleOrder, ecs::schedule::ScheduleLabel, prelude::*};
+
+use crate::btree_drain;
 
 #[derive(Resource, Default)]
 pub struct StateTick {
@@ -68,6 +70,36 @@ pub fn unheld_ranges(held: impl IntoIterator<Item = DirtyState>, latest: DirtySt
 		start = end + 1;
 	}
 	ranges
+}
+
+// What a client holds at its server for some params: the requests it still waits for, and the wanted state of its
+// latest satisfied request. Older satisfied requests are thrown away.
+#[derive(Default)]
+pub struct Claim {
+	pub waiting: BTreeSet<DirtyState>,
+	pub usage: Option<DirtyState>,
+}
+
+impl Claim {
+	pub fn is_empty(&self) -> bool { self.waiting.is_empty() && self.usage.is_none() }
+	pub fn held(&self) -> impl Iterator<Item = DirtyState> + '_ { self.waiting.iter().copied().chain(self.usage) }
+	pub fn request(&mut self, wanted: DirtyState, served: bool) {
+		if served { self.usage = Some(wanted); } else { self.waiting.insert(wanted); }
+	}
+	// Returns true if the data satisfied a wait, the freshest of them is the usage then
+	pub fn pass(&mut self, dirty_state: DirtyState) -> bool {
+		let satisfied = btree_drain::set_drain_range(&mut self.waiting, ..=dirty_state);
+		let Some(&wanted) = satisfied.last() else { return false; };
+		self.usage = Some(wanted);
+		true
+	}
+	// Returns true if it held something the cancel covers
+	pub fn cancel(&mut self, latest: DirtyState, oldest: Option<u64>) -> bool {
+		let waited = !btree_drain::set_drain_range(&mut self.waiting, cancel_range(latest, oldest)).is_empty();
+		let used = self.usage.is_some_and(|usage| usage.is_cancelled_by(latest, oldest));
+		if used { self.usage = None; }
+		waited || used
+	}
 }
 
 impl PartialOrd for DirtyState {

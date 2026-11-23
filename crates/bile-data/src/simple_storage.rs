@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use bevy::{ecs::system::SystemParam, prelude::*};
@@ -6,7 +6,7 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::diff::DiffFulfillerAPI;
 use crate::dyn_system_params::{DynParam, RegisterDynParam};
-use crate::{btree_drain, cancel_range, unheld_ranges, DataType, DirtyState, Request};
+use crate::{unheld_ranges, BileDataSchedule, BileDataSystemSet, Claim, DataType, DirtyState, Request};
 use crate::simple_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams};
 
 // ============================ Storage Requests ============================
@@ -14,77 +14,92 @@ use crate::simple_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfil
 // The bookkeeping of the requests a storage got, for any storage to use
 pub struct StorageRequests<DT: DataType> {
 	requests: HashMap<DT::Params, Requests<DT>>,
+	applied: Vec<DT::Params>, // The diffs were applied right away, the requesters that wait get the data in the PassData stage
 }
 
 struct Requests<DT: DataType> {
-	requested: HashMap<Entity, BTreeSet<DirtyState>>, // Requester -> Requested dirty states that were not cancelled
-	in_flight: BTreeSet<DirtyState>, // Passed on to the fulfillers, no data that satisfies them was passed yet
-	held: BTreeSet<DirtyState>, // Passed on to the fulfillers and not cancelled there
+	requesters: HashMap<Entity, Claim>,
+	fulfillers: Claim, // What was passed on to the fulfillers
 	diffs: Option<Vec<DT::Diff>>, // Every diff since the data was up to date. None if a dirty had no diff
 }
 
 impl<DT: DataType> Default for StorageRequests<DT> {
-	fn default() -> Self { Self { requests: HashMap::default() } }
+	fn default() -> Self { Self { requests: HashMap::default(), applied: Vec::new() } }
 }
 
 impl<DT: DataType> Default for Requests<DT> {
-	fn default() -> Self { Self { requested: HashMap::default(), in_flight: BTreeSet::new(), held: BTreeSet::new(), diffs: None } }
+	fn default() -> Self { Self { requesters: HashMap::default(), fulfillers: Claim::default(), diffs: None } }
 }
 
 impl<DT: DataType> StorageRequests<DT> {
 	pub fn is_requested(&self, params: &DT::Params) -> bool { self.requests.contains_key(params) }
-	pub fn request(&mut self, requester: Entity, request: &Request<DT>) {
-		self.requests.entry(request.params.clone()).or_default().requested.entry(requester).or_default().insert(request.allowed_tick);
+	pub fn request(&mut self, requester: Entity, request: &Request<DT>, served: bool) {
+		self.requests.entry(request.params.clone()).or_default().requesters.entry(requester).or_default().request(request.allowed_tick, served);
 	}
 	pub fn is_in_flight(&self, request: &Request<DT>) -> bool {
-		self.requests.get(&request.params).is_some_and(|requests| requests.in_flight.contains(&request.allowed_tick))
+		self.requests.get(&request.params).is_some_and(|requests| requests.fulfillers.waiting.contains(&request.allowed_tick))
 	}
 	pub fn passed_on(&mut self, request: &Request<DT>) {
 		let Some(requests) = self.requests.get_mut(&request.params) else { return; };
-		requests.in_flight.insert(request.allowed_tick);
-		requests.held.insert(request.allowed_tick);
+		requests.fulfillers.request(request.allowed_tick, false);
 	}
 	// The diffs to bring the stored data up to date
 	pub fn diffs(&self, params: &DT::Params) -> Option<&[DT::Diff]> { self.requests.get(params)?.diffs.as_deref() }
-	// Returns the requesters that requested something the data satisfies
+	pub fn applied(&mut self, params: &DT::Params) {
+		let Some(requests) = self.requests.get_mut(params) else { return; };
+		requests.diffs = Some(Vec::new());
+		self.applied.push(params.clone());
+	}
+	pub fn take_applied(&mut self) -> Vec<DT::Params> { std::mem::take(&mut self.applied) }
+	// A fulfiller passed data, even if it is older than the stored data. Returns false if the params are not requested.
+	pub fn answered(&mut self, params: &DT::Params, dirty_state: DirtyState) -> bool {
+		let Some(requests) = self.requests.get_mut(params) else { return false; };
+		requests.fulfillers.pass(dirty_state);
+		true
+	}
+	// New data was stored. Returns the requesters that waited for something it satisfies
 	pub fn pass_data(&mut self, params: &DT::Params, dirty_state: DirtyState) -> Vec<Entity> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
-		requests.in_flight.retain(|&in_flight| in_flight > dirty_state);
 		requests.diffs = (dirty_state == DirtyState::UpToDate).then(Vec::new);
-		requests.requested.iter().filter(|(_, requested)| requested.first().is_some_and(|&oldest| oldest <= dirty_state)).map(|(&requester, _)| requester).collect()
+		self.satisfied(params, dirty_state)
 	}
-	// Returns the requesters that requested the data
+	// Returns the requesters that waited for something the stored data satisfies
+	pub fn satisfied(&mut self, params: &DT::Params, dirty_state: DirtyState) -> Vec<Entity> {
+		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
+		requests.requesters.iter_mut().filter_map(|(&requester, claim)| claim.pass(dirty_state).then_some(requester)).collect()
+	}
+	// Returns the requesters that hold the data
 	pub fn dirty_data(&mut self, params: &DT::Params, diff: Option<&DT::Diff>) -> Vec<Entity> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
 		match (&mut requests.diffs, diff) {
 			(Some(diffs), Some(diff)) => diffs.push(diff.clone()),
 			_ => requests.diffs = None, // A dirty without a diff ends the run
 		}
-		requests.requested.keys().copied().collect()
+		requests.requesters.keys().copied().collect()
 	}
 	// Returns what to cancel at the fulfillers. The params are no longer requested if every requester cancelled.
 	pub fn cancel(&mut self, requester: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) -> Vec<(DirtyState, Option<u64>)> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
-		let Some(requested) = requests.requested.get_mut(&requester) else { return Vec::new(); };
-		if btree_drain::set_drain_range(requested, cancel_range(latest, oldest)).is_empty() { return Vec::new(); }
-		if requested.is_empty() { requests.requested.remove(&requester); }
-		if requests.requested.is_empty() {
-			let held = !requests.held.is_empty();
+		let Some(claim) = requests.requesters.get_mut(&requester) else { return Vec::new(); };
+		if !claim.cancel(latest, oldest) { return Vec::new(); }
+		if claim.is_empty() { requests.requesters.remove(&requester); }
+		if requests.requesters.is_empty() {
+			let held = !requests.fulfillers.is_empty();
 			self.requests.remove(params);
 			return if held { vec![(DirtyState::UpToDate, None)] } else { Vec::new() };
 		}
-		let mut ranges = unheld_ranges(requests.requested.values().flatten().copied(), latest, oldest);
-		// A request served from the storage never reached the fulfillers. So the fulfillers have to keep some state,
-		// or they would drop data that is still used. Only what is in flight is worth cancelling.
-		ranges.retain(|&(latest, oldest)| {
-			let cancelled = btree_drain::set_drain_range(&mut requests.held, cancel_range(latest, oldest));
-			if requests.held.is_empty() || !cancelled.iter().any(|dirty_state| requests.in_flight.contains(dirty_state)) {
-				requests.held.extend(cancelled);
-				return false;
-			}
-			requests.in_flight.retain(|dirty_state| !cancelled.contains(dirty_state));
-			true
-		});
+		// Only what was passed on and nobody waits for anymore. A request served from the storage never reached the
+		// fulfillers, so they keep their last state, or they would drop data that is still used.
+		let fulfillers = &mut requests.fulfillers;
+		let unwaited: Vec<DirtyState> = fulfillers.waiting.iter().copied()
+			.filter(|dirty_state| dirty_state.is_cancelled_by(latest, oldest) && !requests.requesters.values().any(|claim| claim.waiting.contains(dirty_state)))
+			.collect();
+		if unwaited.is_empty() || fulfillers.usage.is_none() && unwaited.len() == fulfillers.waiting.len() { return Vec::new(); }
+		let held = fulfillers.waiting.iter().copied().filter(|dirty_state| !unwaited.contains(dirty_state)).chain(fulfillers.usage);
+		let mut ranges = unheld_ranges(held, latest, oldest);
+		ranges.retain(|&(latest, oldest)| unwaited.iter().any(|dirty_state| dirty_state.is_cancelled_by(latest, oldest)));
+		// What can not be cancelled without the usage stays in flight
+		fulfillers.waiting.retain(|dirty_state| !ranges.iter().any(|&(latest, oldest)| dirty_state.is_cancelled_by(latest, oldest)));
 		ranges
 	}
 }
@@ -101,7 +116,7 @@ pub struct Fulfillers<'w, 's, DT: DataType> {
 
 impl<DT: DataType> Fulfillers<'_, '_, DT> {
 	// Hands the request to the cheapest fulfiller. That may be a diff fulfiller if there is stale data and the diffs
-	// to bring it up to date, which may return the up to date data right away.
+	// to bring it up to date, which returns the up to date data right away.
 	pub fn request(&mut self, request: Request<DT>, stale: Option<(DT::Data, &[DT::Diff])>) -> Option<DT::Data> {
 		let fulfiller_params = &mut self.fulfiller_params;
 		let fulfiller = self.fulfillers.iter()
@@ -110,23 +125,18 @@ impl<DT: DataType> Fulfillers<'_, '_, DT> {
 		let diff_fulfiller = stale.as_ref().and_then(|(_, diffs)| self.diff_fulfillers.iter()
 			.filter_map(|(entity, diff_fulfiller)| Some((diff_fulfiller.cost(fulfiller_params, &request, diffs)?, entity)))
 			.min_by(|a, b| a.0.total_cmp(&b.0)));
-		if let (Some((cost, entity)), Some((data, diffs))) = (diff_fulfiller, stale) && fulfiller.is_none_or(|(fulfiller_cost, _)| cost < fulfiller_cost) {
-			let (_, mut diff_fulfiller) = self.diff_fulfillers.get_mut(entity).expect("It was just found");
-			return diff_fulfiller.request(&mut self.fulfiller_params, request, data, diffs.to_vec());
+		if let (Some((cost, entity)), Some((data, diffs))) = (diff_fulfiller, stale) && fulfiller.is_none_or(|(fulfiller_cost, _)| cost < fulfiller_cost)
+			&& let Some(data) = self.diff_fulfillers.get_mut(entity).expect("It was just found").1.request(&mut self.fulfiller_params, request.clone(), data, diffs.to_vec()) {
+			return Some(data);
 		}
-		let Some((_, entity)) = fulfiller else {
-			bevy::log::warn!("No fulfiller of {} can fulfill the request.", std::any::type_name::<DT>());
-			return None;
-		};
+		// TODO: a failure path, for now a request nothing can fulfill is a bug
+		let Some((_, entity)) = fulfiller else { panic!("No fulfiller of {} can fulfill the request", std::any::type_name::<DT>()); };
 		self.fulfillers.get_mut(entity).expect("It was just found").1.request(&mut self.fulfiller_params, request);
 		None
 	}
 	pub fn cancel(&mut self, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) {
 		for (_, mut fulfiller) in &mut self.fulfillers {
 			fulfiller.cancel(&mut self.fulfiller_params, params, latest, oldest);
-		}
-		for (_, mut diff_fulfiller) in &mut self.diff_fulfillers {
-			diff_fulfiller.cancel(&mut self.fulfiller_params, params, latest, oldest);
 		}
 	}
 }
@@ -193,21 +203,26 @@ impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 		requester: Entity,
 		request: &Request<DT>,
 	) -> Option<(DT::Data, DirtyState)>  {
-		self.requests.request(requester, request);
 		let stored = self.data.get(&request.params).and_then(|(dirty_state, data)| Some((*dirty_state, data.as_ref()?)));
 		if let Some((dirty_state, data)) = stored && dirty_state >= request.allowed_tick {
+			self.requests.request(requester, request, true);
 			return Some((data.clone(), dirty_state));
 		}
-		if self.requests.is_in_flight(request) { return None; }
+		if self.requests.is_in_flight(request) {
+			self.requests.request(requester, request, false);
+			return None;
+		}
 		let stale = stored.and_then(|(_, data)| Some((data.clone(), self.requests.diffs(&request.params)?)));
 		let mut fulfillers = storage_params.get::<StorageRequesterSystemParams<DT>>();
-		let Some(data) = fulfillers.request(request.clone(), stale) else {
+		let applied = fulfillers.request(request.clone(), stale);
+		self.requests.request(requester, request, applied.is_some());
+		let Some(data) = applied else {
 			self.requests.passed_on(request);
 			return None;
 		};
 		// The diffs were applied right away
 		self.data.insert(request.params.clone(), (DirtyState::UpToDate, Some(data.clone())));
-		self.requests.pass_data(&request.params, DirtyState::UpToDate);
+		self.requests.applied(&request.params);
 		Some((data, DirtyState::UpToDate))
 	}
 
@@ -237,7 +252,7 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 		dirty_state: DirtyState,
 		data: DT::Data,
 	) {
-		if !self.requests.is_requested(params) { return; }
+		if !self.requests.answered(params, dirty_state) { return; }
 		if self.data.get(params).is_some_and(|(stored, _)| *stored > dirty_state) { return; }
 		let requesters = self.requests.pass_data(params, dirty_state);
 		storage_params.get::<StorageFulfillerSystemParams<DT>>().pass_data(requesters, params, dirty_state, &data);
@@ -259,6 +274,14 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 	}
 }
 
+fn pass_applied<DT: DataType>(mut storage: ResMut<Storage<DT>>, mut requesters: Requesters<DT>) {
+	let storage = &mut *storage;
+	for params in storage.requests.take_applied() {
+		let Some((dirty_state, Some(data))) = storage.data.get(&params) else { continue; };
+		requesters.pass_data(storage.requests.satisfied(&params, *dirty_state), &params, *dirty_state, data);
+	}
+}
+
 pub trait BileAddSimpleStorage {
 	fn add_simple_storage<DT: DataType>(&mut self) -> &mut Self;
 }
@@ -270,5 +293,6 @@ impl BileAddSimpleStorage for App {
 			.register_component_as::<dyn StorageFulfillerAPI<DT>, Storage<DT>>()
 			.register_dyn_param::<StorageRequesterParams<DT>, StorageRequesterSystemParams<DT>>()
 			.register_dyn_param::<StorageFulfillerParams<DT>, StorageFulfillerSystemParams<DT>>()
+			.add_systems(BileDataSchedule, pass_applied::<DT>.in_set(BileDataSystemSet::PassData))
 	}
 }

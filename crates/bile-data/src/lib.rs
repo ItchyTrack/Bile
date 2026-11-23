@@ -20,7 +20,7 @@ use bevy::prelude::*;
 
 use crate::{setup::BileDataDefaultPlugin};
 
-pub use setup::{StateTick, Request, DirtyState, DataType, BileDataSchedule, BileDataSystemSet, cancel_range, unheld_ranges};
+pub use setup::{StateTick, Request, DirtyState, DataType, BileDataSchedule, BileDataSystemSet, cancel_range, unheld_ranges, Claim};
 
 #[derive(Default)]
 pub struct BileDataPlugin;

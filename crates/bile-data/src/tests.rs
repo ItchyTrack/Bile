@@ -64,13 +64,12 @@ impl ConsumingNodeAPI<Sum> for Consumer {
 }
 
 #[derive(Component)]
-struct Adder { cost: f32, instant: bool, pending: Option<u32> }
+struct Adder { cost: f32, applies: bool }
 impl DiffApplyingNode<Sum> for Adder {
 	fn diff_cost(&self, _request: &Request<Sum>, _diffs: &[u32]) -> Option<f32> { Some(self.cost) }
 	fn apply(&mut self, _params: &u32, data: &mut u32, diffs: Vec<u32>) -> bool {
-		let sum = *data + diffs.iter().sum::<u32>();
-		if self.instant { *data = sum; } else { self.pending = Some(sum); }
-		self.instant
+		if self.applies { *data += diffs.iter().sum::<u32>(); }
+		self.applies
 	}
 }
 
@@ -175,6 +174,14 @@ fn dirty_reaches_the_nodes_with_the_data_and_newer_data_is_requested_again() {
 	assert_eq!(events(&app, waiting).last(), Some(&"pass 3 UpToDate 31"));
 }
 
+#[test]
+#[should_panic(expected = "No fulfiller of bile_data::tests::Sum")]
+fn a_request_no_fulfiller_can_take_panics() {
+	let mut app = sum_app();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, UP_TO_DATE);
+}
+
 // ============================ Cancelling ============================
 
 #[test]
@@ -243,6 +250,72 @@ fn the_node_keeps_the_data_while_it_is_used_from_the_storage() {
 	assert_eq!(producer(&app, source).cancels[1], (4, UP_TO_DATE, None));
 }
 
+#[test]
+fn a_cancel_releases_the_requests_one_pass_satisfied() {
+	let mut app = sum_app();
+	let source = app.world_mut().spawn(Producer::new(1.0)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, dirty(5));
+	request(&mut app, a, 3, UP_TO_DATE);
+	pass(&mut app, source, 3, UP_TO_DATE, 30);
+	cancel(&mut app, a, 3, UP_TO_DATE, Some(6));
+	cancel(&mut app, a, 3, UP_TO_DATE, None);
+	assert_eq!(producer(&app, source).cancels, vec![(3, UP_TO_DATE, None)]);
+}
+
+#[test]
+fn a_cancel_keeps_the_data_another_node_uses() {
+	let mut app = sum_app();
+	let source = app.world_mut().spawn(Producer::new(1.0)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, dirty(5));
+	request(&mut app, b, 3, UP_TO_DATE);
+	pass(&mut app, source, 3, UP_TO_DATE, 30);
+	cancel(&mut app, b, 3, UP_TO_DATE, None);
+	assert!(producer(&app, source).cancels.is_empty());
+	cancel(&mut app, a, 3, UP_TO_DATE, None);
+	assert_eq!(producer(&app, source).cancels, vec![(3, UP_TO_DATE, None)]);
+}
+
+#[test]
+fn a_cancel_that_is_not_passed_on_keeps_the_request_in_flight() {
+	let mut app = sum_app();
+	let source = app.world_mut().spawn(Producer::new(1.0)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, UP_TO_DATE);
+	pass(&mut app, source, 3, UP_TO_DATE, 30);
+	mark_dirty(&mut app, 3, 5, None);
+	assert_eq!(request(&mut app, a, 3, dirty(5)), Some((30, dirty(5))));
+	assert_eq!(request(&mut app, b, 3, UP_TO_DATE), None);
+	// the node is not told, a cancel of UpToDate would also cover what its data is used for
+	cancel(&mut app, b, 3, UP_TO_DATE, None);
+	assert!(producer(&app, source).cancels.is_empty());
+	// so it still works on it
+	assert_eq!(request(&mut app, b, 3, UP_TO_DATE), None);
+	assert_eq!(producer(&app, source).requests.len(), 2);
+}
+
+#[test]
+fn a_cancel_keeps_the_node_whose_data_is_used() {
+	let mut app = sum_app();
+	let first = app.world_mut().spawn(Producer::new(1.0)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, dirty(5));
+	// the next requests go to another node
+	let second = app.world_mut().spawn(Producer::new(0.5)).id();
+	request(&mut app, b, 3, UP_TO_DATE);
+	pass(&mut app, first, 3, UP_TO_DATE, 30);
+	mark_dirty(&mut app, 3, 5, None);
+	assert_eq!(request(&mut app, a, 3, dirty(1)), Some((30, dirty(5))));
+	assert_eq!(request(&mut app, b, 3, dirty(6)), None);
+	cancel(&mut app, b, 3, dirty(6), Some(5));
+	assert_eq!(producer(&app, second).cancels, vec![(3, dirty(6), Some(5))]);
+	assert!(producer(&app, first).cancels.is_empty());
+}
+
 #[derive(Resource)]
 struct OtherRequester { entity: Entity, passes: Vec<u32> }
 impl RequesterAPI<Sum> for OtherRequester {
@@ -293,7 +366,7 @@ fn requesters_do_not_cancel_each_other() {
 }
 
 #[test]
-fn a_pass_reaches_every_requester_that_waits() {
+fn a_pass_reaches_only_the_requesters_that_wait() {
 	let mut app = sum_app();
 	app.insert_resource(OtherRequester { entity: Entity::PLACEHOLDER, passes: Vec::new() });
 	let entity = app.world().resource_entity::<OtherRequester>().unwrap();
@@ -305,6 +378,11 @@ fn a_pass_reaches_every_requester_that_waits() {
 	other_request(&mut app, false);
 	pass(&mut app, source, 3, UP_TO_DATE, 30);
 	assert_eq!(events(&app, a), vec!["pass 3 UpToDate 30"]);
+	assert_eq!(app.world().resource::<OtherRequester>().passes, vec![30]);
+	mark_dirty(&mut app, 3, 4, None);
+	request(&mut app, a, 3, UP_TO_DATE);
+	pass(&mut app, source, 3, UP_TO_DATE, 31);
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 31"));
 	assert_eq!(app.world().resource::<OtherRequester>().passes, vec![30]);
 }
 
@@ -324,7 +402,7 @@ fn diff_app(adder: Adder) -> (App, Entity, Entity, Entity) {
 
 #[test]
 fn diffs_are_applied_instead_of_producing_again() {
-	let (mut app, source, _, a) = diff_app(Adder { cost: 0.5, instant: true, pending: None });
+	let (mut app, source, _, a) = diff_app(Adder { cost: 0.5, applies: true });
 	assert_eq!(events(&app, a), vec!["pass 3 UpToDate 30", "dirty 3 1 Some(5)"]);
 	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((35, UP_TO_DATE)));
 	mark_dirty(&mut app, 3, 2, Some(1));
@@ -347,23 +425,43 @@ fn diffs_are_applied_instead_of_producing_again() {
 
 #[test]
 fn diffs_are_only_applied_when_that_is_cheaper() {
-	let (mut app, source, _, a) = diff_app(Adder { cost: 2.0, instant: true, pending: None });
+	let (mut app, source, _, a) = diff_app(Adder { cost: 2.0, applies: true });
 	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
 	assert_eq!(producer(&app, source).requests.len(), 2);
 }
 
 #[test]
-fn diffs_can_be_applied_later() {
-	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, instant: false, pending: None });
+fn diffs_that_are_not_applied_are_produced_again() {
+	let (mut app, source, _, a) = diff_app(Adder { cost: 0.5, applies: false });
 	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
-	assert_eq!(app.world().get::<Adder>(adder).unwrap().pending, Some(35));
-	assert_eq!(producer(&app, source).requests.len(), 1);
-	pass(&mut app, adder, 3, UP_TO_DATE, 35);
-	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 35"));
-	// it was asked once
-	pass(&mut app, adder, 3, UP_TO_DATE, 99);
+	assert_eq!(producer(&app, source).requests.len(), 2);
+	pass(&mut app, source, 3, UP_TO_DATE, 40);
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 40"));
+}
+
+#[test]
+fn applied_diffs_reach_the_nodes_that_wait() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 2.0, applies: true });
 	let b = app.world_mut().spawn(Consumer::default()).id();
-	assert_eq!(request(&mut app, b, 3, UP_TO_DATE), Some((35, UP_TO_DATE)));
+	assert_eq!(request(&mut app, b, 3, dirty(2)), None);
+	assert_eq!(request(&mut app, a, 3, dirty(2)), None);
+	assert_eq!(producer(&app, source).requests.len(), 2);
+	app.world_mut().get_mut::<Adder>(adder).unwrap().cost = 0.5;
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((35, UP_TO_DATE)));
+	app.update();
+	assert_eq!(events(&app, b), vec!["pass 3 UpToDate 35"]);
+	// a got it already
+	assert_eq!(events(&app, a), vec!["pass 3 UpToDate 30", "dirty 3 1 Some(5)"]);
+}
+
+#[test]
+fn a_dirty_after_applied_diffs_keeps_its_diff() {
+	let (mut app, source, _, a) = diff_app(Adder { cost: 0.5, applies: true });
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((35, UP_TO_DATE)));
+	mark_dirty(&mut app, 3, 2, Some(1));
+	app.update();
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((36, UP_TO_DATE)));
+	assert_eq!(producer(&app, source).requests.len(), 1);
 }
 
 // Like a source that can also edit its data
@@ -383,7 +481,7 @@ impl DiffApplyingNode<Sum> for Both {
 fn a_node_can_produce_and_apply_diffs() {
 	let mut app = sum_app();
 	app.register_producer_simple::<Sum, Both>().register_diff_applier::<Sum, Both>();
-	let both = app.world_mut().spawn(Both(Producer::new(1.0), Adder { cost: 0.5, instant: true, pending: None })).id();
+	let both = app.world_mut().spawn(Both(Producer::new(1.0), Adder { cost: 0.5, applies: true })).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
 	request(&mut app, a, 3, UP_TO_DATE);
 	pass(&mut app, both, 3, UP_TO_DATE, 30);
