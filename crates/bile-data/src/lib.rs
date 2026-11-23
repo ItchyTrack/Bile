@@ -10,12 +10,12 @@ pub mod simple_storage;
 pub mod streaming_api;
 pub mod btree_drain;
 pub mod cancel_range;
-// pub mod streaming_consuming;
-// pub mod streaming_producing;
-// pub mod streaming;
-// pub mod gather;
-// #[cfg(test)]
-// mod streaming_tests;
+pub mod streaming_consuming;
+pub mod streaming_producing;
+pub mod streaming_storage;
+pub mod gather;
+#[cfg(test)]
+mod streaming_tests;
 
 use bevy::prelude::*;
 

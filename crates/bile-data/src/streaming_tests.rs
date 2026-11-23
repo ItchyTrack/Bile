@@ -1,319 +1,207 @@
 use bevy::ecs::system::RunSystemOnce;
 
-use crate::{diff::BileRegisterDiff, gather::BileRegisterGather, setup::{DataType, Request}, simple::{self, BileRegisterSimple}, streaming::{self, BileRegisterStreaming}, *};
+use crate::{gather::BileRegisterGather, streaming_api::StreamId, *};
+use crate::streaming_consuming::{BileRegisterStreamingConsumer, ConsumingNodeAPI, Requester};
+use crate::streaming_producing::{BileRegisterStreamingProducer, DataDirtier, DataPasser, ProducingNodeAPI};
+use crate::streaming_storage::BileAddStreamingStorage;
+
+const UP_TO_DATE: DirtyState = DirtyState::UpToDate;
+const fn dirty(tick: u64) -> DirtyState { DirtyState::Dirty { tick } }
+
+// ============================ Nodes ============================
 
 struct Parts;
 impl DataType for Parts {
 	type Params = u32;
 	type Data = u32;
-	type Diff = ();
+	type Diff = u32;
+}
+
+#[derive(Component)]
+struct Producer { cost: Option<f32>, requests: Vec<(StreamId, u32, DirtyState)>, cancels: Vec<(u32, DirtyState, Option<u64>)> }
+impl Producer {
+	fn new(cost: Option<f32>) -> Self { Self { cost, requests: Vec::new(), cancels: Vec::new() } }
+}
+impl ProducingNodeAPI<Parts> for Producer {
+	fn cost(&self, _request: &Request<Parts>) -> Option<f32> { self.cost }
+	fn request(&mut self, stream_id: StreamId, request: Request<Parts>) { self.requests.push((stream_id, request.params, request.allowed_tick)); }
+	fn cancel(&mut self, params: &u32, latest: DirtyState, oldest: Option<u64>) { self.cancels.push((*params, latest, oldest)); }
 }
 
 #[derive(Component, Default)]
 struct Consumer(Vec<String>);
-impl streaming::DataConsumingNode<Parts> for Consumer {
-	fn start_data(&mut self, params: &u32, _tick: u64) { self.0.push(format!("start {params}")); }
-	fn push_data(&mut self, params: &u32, data: u32) { self.0.push(format!("push {params} {data}")); }
-	fn finish_data(&mut self, params: &u32) { self.0.push(format!("finish {params}")); }
-	fn dirty_data(&mut self, params: &u32, _tick: u64, _diff: Option<&()>) { self.0.push(format!("dirty {params}")); }
+impl ConsumingNodeAPI<Parts> for Consumer {
+	fn push_data(&mut self, _stream_id: StreamId, params: &u32, dirty_state: DirtyState, data: u32) { self.0.push(format!("push {params} {dirty_state:?} {data}")); }
+	fn finish_data(&mut self, _stream_id: StreamId, params: &u32) { self.0.push(format!("finish {params}")); }
+	fn dirty_data(&mut self, params: &u32, last_clean_tick: u64, diff: Option<&u32>) { self.0.push(format!("dirty {params} {last_clean_tick} {diff:?}")); }
 }
 
-#[derive(Component, Default)]
-struct StreamProducer(Vec<(u32, streaming::StreamId)>, Vec<u32>, Option<f32>);
-impl streaming::DataProducingNode<Parts> for StreamProducer {
-	fn cost(&self, _request: &Request<Parts>) -> Option<f32> { self.2 }
-	fn request(&mut self, request: Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
-	fn drop(&mut self, params: &u32) { self.1.push(*params); }
+fn streaming_app() -> App {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.add_streaming_storage::<Parts>().register_producer_streaming::<Parts, Producer>().register_consumer_streaming::<Parts, Consumer>();
+	app
+}
+fn gather_app() -> App {
+	let mut app = App::new();
+	app.add_plugins(BileDataPlugin);
+	app.add_streaming_storage::<Parts>().register_producer_gather::<Parts, Producer>().register_consumer_streaming::<Parts, Consumer>();
+	app
 }
 
-#[derive(Component, Default)]
-struct GatherProducer(Vec<(u32, streaming::StreamId)>, Vec<u32>, Option<f32>);
-impl gather::DataProducingNode<Parts> for GatherProducer {
-	fn cost(&self, _request: &Request<Parts>) -> Option<f32> { self.2 }
-	fn request(&mut self, request: Request<Parts>, stream_id: streaming::StreamId) { self.0.push((request.params, stream_id)); }
-	fn drop(&mut self, params: &u32) { self.1.push(*params); }
+fn request(app: &mut App, node: Entity, params: u32, allowed_tick: DirtyState) -> StreamId {
+	app.world_mut().run_system_once(move |mut requester: Requester<Parts>| requester.request(Request::new(params, allowed_tick), node)).unwrap()
+}
+fn cancel(app: &mut App, node: Entity, params: u32, latest: DirtyState, oldest: Option<u64>) {
+	app.world_mut().run_system_once(move |mut requester: Requester<Parts>| requester.cancel(&params, latest, oldest, node)).unwrap();
+}
+fn push(app: &mut App, source: Entity, stream_id: StreamId, params: u32, data: u32) {
+	app.world_mut().run_system_once(move |mut passer: DataPasser<Parts>| passer.push(source, stream_id, &params, UP_TO_DATE, data)).unwrap();
+}
+fn finish(app: &mut App, source: Entity, stream_id: StreamId, params: u32) {
+	app.world_mut().run_system_once(move |mut passer: DataPasser<Parts>| passer.finish(source, stream_id, &params)).unwrap();
+}
+fn mark_dirty(app: &mut App, params: u32, last_clean_tick: u64, diff: Option<u32>) {
+	app.world_mut().run_system_once(move |mut dirtier: DataDirtier<Parts>| dirtier.mark_dirty(&params, last_clean_tick, diff.as_ref())).unwrap();
+}
+fn events(app: &App, node: Entity) -> Vec<&str> {
+	app.world().get::<Consumer>(node).unwrap().0.iter().map(String::as_str).collect()
+}
+fn producer(app: &App, node: Entity) -> &Producer {
+	app.world().get::<Producer>(node).unwrap()
 }
 
-fn request_parts(app: &mut App, entity: Entity) {
-	app.world_mut()
-		.run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.request(Request { params: 3, allowed_tick: DirtyState::UpToDate }, entity))
-		.unwrap();
-}
+// ============================ Streaming ============================
 
-fn events(app: &App, entity: Entity) -> Vec<&str> {
-	app.world().get::<Consumer>(entity).unwrap().0.iter().map(String::as_str).collect()
+#[test]
+fn the_cheapest_node_streams_to_the_consumer_in_order() {
+	let mut app = streaming_app();
+	let expensive = app.world_mut().spawn(Producer::new(Some(2.0))).id();
+	let cheap = app.world_mut().spawn(Producer::new(Some(1.0))).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	let stream = request(&mut app, a, 3, UP_TO_DATE);
+	assert_eq!(producer(&app, cheap).requests, vec![(stream, 3, UP_TO_DATE)]);
+	assert!(producer(&app, expensive).requests.is_empty());
+	// a node that was not asked passes nothing
+	push(&mut app, expensive, stream, 3, 99);
+	push(&mut app, cheap, stream, 3, 10);
+	push(&mut app, cheap, stream, 3, 20);
+	finish(&mut app, cheap, stream, 3);
+	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10", "push 3 UpToDate 20", "finish 3"]);
 }
 
 #[test]
-fn streaming_producer_streams() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_producer_streaming::<Parts, StreamProducer>().register_consumer_streaming::<Parts, Consumer>();
-	let producer = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(1.0))).id();
-	app.world_mut().spawn(StreamProducer(vec![], vec![], Some(2.0)));
+fn a_request_joins_the_stream_until_it_pushed() {
+	let mut app = streaming_app();
+	let source = app.world_mut().spawn(Producer::new(Some(1.0))).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
 	let b = app.world_mut().spawn(Consumer::default()).id();
 	let c = app.world_mut().spawn(Consumer::default()).id();
-	request_parts(&mut app, a);
-	let (params, id) = app.world().get::<StreamProducer>(producer).unwrap().0[0];
-	assert_eq!(params, 3);
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(producer, &3, id, DirtyState::UpToDate);
-			passer.push(producer, &3, id, 10);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10"]);
-	// a requester that is late gets what was already streamed and then the rest
-	request_parts(&mut app, b);
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.push(producer, &3, id, 20);
-			passer.finish(producer, &3, id);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
-	assert_eq!(events(&app, b), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
-	// also after the stream finished
-	request_parts(&mut app, c);
-	app.update();
-	assert_eq!(events(&app, c), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
-	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().0.len(), 1);
-	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
-	assert_eq!(*events(&app, a).last().unwrap(), "dirty 3");
-	// dirty data is not replayed
-	request_parts(&mut app, a);
-	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().0.len(), 2);
+	let first = request(&mut app, a, 3, UP_TO_DATE);
+	assert_eq!(request(&mut app, b, 3, UP_TO_DATE), first);
+	assert_eq!(producer(&app, source).requests.len(), 1);
+	push(&mut app, source, first, 3, 10);
+	// nothing is kept, so a later request is a new stream
+	let second = request(&mut app, c, 3, UP_TO_DATE);
+	assert_ne!(second, first);
+	assert_eq!(producer(&app, source).requests[1], (second, 3, UP_TO_DATE));
+	push(&mut app, source, first, 3, 20);
+	finish(&mut app, source, first, 3);
+	push(&mut app, source, second, 3, 30);
+	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10", "push 3 UpToDate 20", "finish 3"]);
+	assert_eq!(events(&app, b), events(&app, a));
+	assert_eq!(events(&app, c), vec!["push 3 UpToDate 30"]);
 }
 
 #[test]
-fn gather_requests_every_node() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_producer_gather::<Parts, GatherProducer>().register_consumer_streaming::<Parts, Consumer>();
-	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
-	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
-	let z = app.world_mut().spawn(GatherProducer(vec![], vec![], None)).id();
+fn dirty_reaches_the_nodes_with_data_and_does_not_cancel() {
+	let mut app = streaming_app();
+	let source = app.world_mut().spawn(Producer::new(Some(1.0))).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
 	let b = app.world_mut().spawn(Consumer::default()).id();
-	request_parts(&mut app, a);
-	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, id)]);
-	assert!(app.world().get::<GatherProducer>(z).unwrap().0.is_empty());
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(x, &3, id, DirtyState::UpToDate);
-			passer.push(x, &3, id, 10);
-			passer.finish(x, &3, id);
-			passer.push(x, &3, id, 90);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10"]);
-	request_parts(&mut app, b);
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(y, &3, id, DirtyState::UpToDate);
-			passer.push(y, &3, id, 20);
-		})
-		.unwrap();
-	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| { requester.cancel(&3, a); requester.cancel(&3, b); }).unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "push 3 20"]);
-	assert_eq!(events(&app, b), vec!["start 3", "push 3 10", "push 3 20"]);
-	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
-	assert!(app.world().get::<GatherProducer>(z).unwrap().1.is_empty());
+	let first = request(&mut app, a, 3, UP_TO_DATE);
+	push(&mut app, source, first, 3, 10);
+	let second = request(&mut app, b, 3, UP_TO_DATE);
+	mark_dirty(&mut app, 3, 4, Some(1));
+	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10", "dirty 3 4 Some(1)"]);
+	assert!(events(&app, b).is_empty());
+	assert!(producer(&app, source).cancels.is_empty());
+	// a asks again and joins the stream that has not pushed yet
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), second);
+	push(&mut app, source, second, 3, 11);
+	assert_eq!(events(&app, a).last(), Some(&"push 3 UpToDate 11"));
+	assert_eq!(events(&app, b), vec!["push 3 UpToDate 11"]);
 }
 
 #[test]
-fn gather_does_not_depend_on_the_registration_order() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_consumer_streaming::<Parts, Consumer>().register_producer_gather::<Parts, GatherProducer>();
-	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
-	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
+#[should_panic(expected = "No fulfiller of bile_data::streaming_tests::Parts")]
+fn a_request_no_fulfiller_can_take_panics() {
+	let mut app = streaming_app();
 	let a = app.world_mut().spawn(Consumer::default()).id();
-	request_parts(&mut app, a);
-	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().0.len(), 1);
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0.len(), 1);
+	request(&mut app, a, 3, UP_TO_DATE);
 }
 
-#[test]
-fn the_cheapest_fulfiller_streams() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_producer_streaming::<Parts, StreamProducer>()
-		.register_producer_gather::<Parts, GatherProducer>()
-		.register_consumer_streaming::<Parts, Consumer>();
-	let producer = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(2.0))).id();
-	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
-	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.5))).id();
-	let a = app.world_mut().spawn(Consumer::default()).id();
-	// the gather costs as much as its most expensive node
-	request_parts(&mut app, a);
-	assert!(app.world().get::<StreamProducer>(producer).unwrap().0.is_empty());
-	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, id)]);
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(x, &3, id, DirtyState::UpToDate);
-			passer.start(y, &3, id, DirtyState::UpToDate);
-			passer.push(x, &3, id, 10);
-			passer.finish(x, &3, id);
-			passer.finish(y, &3, id);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3"]);
-	// the gather got more expensive, so the stream producer streams the new data and the gather nodes are dropped
-	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
-	app.world_mut().get_mut::<GatherProducer>(y).unwrap().2 = Some(5.0);
-	request_parts(&mut app, a);
-	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().0.len(), 1);
-	let (_, id) = app.world().get::<StreamProducer>(producer).unwrap().0[0];
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(producer, &3, id, DirtyState::UpToDate);
-			passer.push(producer, &3, id, 20);
-			passer.finish(producer, &3, id);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3", "dirty 3", "start 3", "push 3 20", "finish 3"]);
-	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
-	assert!(app.world().get::<StreamProducer>(producer).unwrap().1.is_empty());
-}
+// ============================ Cancelling ============================
 
 #[test]
-fn finished_stream_is_released_when_its_last_user_cancels() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_producer_streaming::<Parts, StreamProducer>().register_consumer_streaming::<Parts, Consumer>();
-	let producer = app.world_mut().spawn(StreamProducer(vec![], vec![], Some(1.0))).id();
+fn cancel_keeps_what_another_node_holds() {
+	let mut app = streaming_app();
+	let source = app.world_mut().spawn(Producer::new(Some(1.0))).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
 	let b = app.world_mut().spawn(Consumer::default()).id();
-	request_parts(&mut app, a);
-	let (_, id) = app.world().get::<StreamProducer>(producer).unwrap().0[0];
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(producer, &3, id, DirtyState::UpToDate);
-			passer.push(producer, &3, id, 10);
-			passer.finish(producer, &3, id);
-		})
-		.unwrap();
-	request_parts(&mut app, b);
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3"]);
-	assert_eq!(events(&app, b), vec!["start 3", "push 3 10", "finish 3"]);
-	// the finished stream stays for as long as it has a user
-	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
-	app.update();
-	assert!(app.world().get::<StreamProducer>(producer).unwrap().1.is_empty());
-	request_parts(&mut app, a);
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "finish 3", "start 3", "push 3 10", "finish 3"]);
-	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().0.len(), 1);
-	// the last cancel releases it and drops the producer
-	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| { requester.cancel(&3, a); requester.cancel(&3, b); }).unwrap();
-	app.update();
-	assert_eq!(app.world().get::<StreamProducer>(producer).unwrap().1, vec![3]);
-	// so nothing is left to replay and the producer is requested again
-	request_parts(&mut app, a);
-	app.update();
-	assert_eq!(events(&app, a).len(), 6);
-	let requests = &app.world().get::<StreamProducer>(producer).unwrap().0;
-	assert_eq!(requests.len(), 2);
-	assert_ne!(requests[1].1, id);
+	let stream = request(&mut app, a, 3, UP_TO_DATE);
+	request(&mut app, b, 3, UP_TO_DATE);
+	cancel(&mut app, a, 3, UP_TO_DATE, None);
+	assert!(producer(&app, source).cancels.is_empty());
+	push(&mut app, source, stream, 3, 10);
+	assert!(events(&app, a).is_empty());
+	assert_eq!(events(&app, b), vec!["push 3 UpToDate 10"]);
+	// the last cancel reaches the node, midway through the stream
+	cancel(&mut app, b, 3, UP_TO_DATE, None);
+	assert_eq!(producer(&app, source).cancels, vec![(3, UP_TO_DATE, None)]);
+	push(&mut app, source, stream, 3, 20);
+	assert_eq!(events(&app, b).len(), 1);
 }
 
 #[test]
-fn finished_gather_is_released_when_its_last_user_cancels() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_producer_gather::<Parts, GatherProducer>().register_consumer_streaming::<Parts, Consumer>();
-	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
-	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
+fn cancel_only_reaches_what_nobody_holds() {
+	let mut app = streaming_app();
+	let source = app.world_mut().spawn(Producer::new(Some(1.0))).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
-	request_parts(&mut app, a);
-	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(x, &3, id, DirtyState::UpToDate);
-			passer.start(y, &3, id, DirtyState::UpToDate);
-			passer.push(x, &3, id, 10);
-			passer.push(y, &3, id, 20);
-			passer.finish(x, &3, id);
-			passer.finish(y, &3, id);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "push 3 20", "finish 3"]);
-	assert!(app.world().get::<GatherProducer>(x).unwrap().1.is_empty());
-	assert!(app.world().get::<GatherProducer>(y).unwrap().1.is_empty());
-	// the last cancel releases the finished stream and drops every node of it
-	app.world_mut().run_system_once(move |mut requester: streaming::DataRequester<Parts>| requester.cancel(&3, a)).unwrap();
-	app.update();
-	assert_eq!(app.world().get::<GatherProducer>(x).unwrap().1, vec![3]);
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().1, vec![3]);
-	// so nothing is left to replay and every node is requested again
-	request_parts(&mut app, a);
-	app.update();
-	assert_eq!(events(&app, a).len(), 4);
-	let requests = &app.world().get::<GatherProducer>(x).unwrap().0;
-	assert_eq!(requests.len(), 2);
-	assert_ne!(requests[1].1, id);
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, *requests);
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, UP_TO_DATE);
+	let stream = request(&mut app, b, 3, dirty(5));
+	assert_eq!(producer(&app, source).requests.len(), 2);
+	cancel(&mut app, a, 3, UP_TO_DATE, None);
+	assert_eq!(producer(&app, source).cancels, vec![(3, UP_TO_DATE, Some(6))]);
+	push(&mut app, source, stream, 3, 50);
+	assert_eq!(events(&app, b), vec!["push 3 UpToDate 50"]);
 }
 
+// ============================ Gather ============================
+
 #[test]
-fn gather_replacing_a_live_stream_does_not_drop_its_nodes() {
-	let mut app = App::new();
-	app.add_plugins(BileDataPlugin);
-	app.register_producer_gather::<Parts, GatherProducer>().register_consumer_streaming::<Parts, Consumer>();
-	let x = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(1.0))).id();
-	let y = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(2.0))).id();
-	let z = app.world_mut().spawn(GatherProducer(vec![], vec![], Some(3.0))).id();
+fn gather_asks_every_node_that_can_and_finishes_when_all_did() {
+	let mut app = gather_app();
+	let x = app.world_mut().spawn(Producer::new(Some(1.0))).id();
+	let y = app.world_mut().spawn(Producer::new(Some(2.0))).id();
+	let z = app.world_mut().spawn(Producer::new(None)).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
-	request_parts(&mut app, a);
-	let (_, old_id) = app.world().get::<GatherProducer>(x).unwrap().0[0];
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.start(x, &3, old_id, DirtyState::UpToDate);
-			passer.push(x, &3, old_id, 10);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10"]);
-	// the data is dirtied while y and z are still producing it and is requested again, z has nothing for it anymore
-	app.world_mut().run_system_once(|mut dirtier: streaming::DataDirtier<Parts>| dirtier.mark_dirty(&3, None)).unwrap();
-	app.world_mut().get_mut::<GatherProducer>(z).unwrap().2 = None;
-	request_parts(&mut app, a);
-	let (_, id) = app.world().get::<GatherProducer>(x).unwrap().0[1];
-	assert_ne!(id, old_id);
-	assert_eq!(app.world().get::<GatherProducer>(y).unwrap().0, vec![(3, old_id), (3, id)]);
-	assert_eq!(app.world().get::<GatherProducer>(z).unwrap().0, vec![(3, old_id)]);
-	app.world_mut().run_system_once(move |mut passer: streaming::DataPasser<Parts>| passer.start(x, &3, id, DirtyState::UpToDate)).unwrap();
-	app.update();
-	// x and y produce the new stream now, a drop would stop that too; only z is no longer needed
-	assert!(app.world().get::<GatherProducer>(x).unwrap().1.is_empty());
-	assert!(app.world().get::<GatherProducer>(y).unwrap().1.is_empty());
-	assert_eq!(app.world().get::<GatherProducer>(z).unwrap().1, vec![3]);
-	app.world_mut()
-		.run_system_once(move |mut passer: streaming::DataPasser<Parts>| {
-			passer.push(x, &3, id, 11);
-			passer.finish(x, &3, id);
-			passer.push(y, &3, old_id, 20); // of the replaced stream
-			passer.start(y, &3, id, DirtyState::UpToDate);
-			passer.push(y, &3, id, 21);
-			passer.finish(y, &3, id);
-		})
-		.unwrap();
-	app.update();
-	assert_eq!(events(&app, a), vec!["start 3", "push 3 10", "dirty 3", "start 3", "push 3 11", "push 3 21", "finish 3"]);
-	assert!(app.world().get::<GatherProducer>(x).unwrap().1.is_empty());
-	assert!(app.world().get::<GatherProducer>(y).unwrap().1.is_empty());
+	let stream = request(&mut app, a, 3, UP_TO_DATE);
+	assert_eq!(producer(&app, x).requests, vec![(stream, 3, UP_TO_DATE)]);
+	assert_eq!(producer(&app, y).requests, vec![(stream, 3, UP_TO_DATE)]);
+	assert!(producer(&app, z).requests.is_empty());
+	push(&mut app, x, stream, 3, 10);
+	finish(&mut app, x, stream, 3);
+	// a node that finished or was not asked passes nothing
+	push(&mut app, x, stream, 3, 90);
+	push(&mut app, z, stream, 3, 99);
+	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10"]);
+	push(&mut app, y, stream, 3, 20);
+	finish(&mut app, y, stream, 3);
+	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10", "push 3 UpToDate 20", "finish 3"]);
+	cancel(&mut app, a, 3, UP_TO_DATE, None);
+	assert_eq!(producer(&app, x).cancels, vec![(3, UP_TO_DATE, None)]);
+	assert_eq!(producer(&app, y).cancels, vec![(3, UP_TO_DATE, None)]);
+	assert!(producer(&app, z).cancels.is_empty());
 }
