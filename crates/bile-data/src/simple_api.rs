@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use bevy::prelude::*;
+
 use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
 
 // ============================ Requester ============================
@@ -17,11 +19,13 @@ pub trait StorageRequesterAPI<DT: DataType> {
 	fn request(
 		&mut self,
 		storage_params: &mut DynSystemParams<StorageRequesterParams<DT>>,
+		requester: Entity,
 		request: &Request<DT>,
 	) -> Option<(DT::Data, DirtyState)>;
 	fn cancel(
 		&mut self,
 		storage_params: &mut DynSystemParams<StorageRequesterParams<DT>>,
+		requester: Entity,
 		params: &DT::Params,
 		latest: DirtyState,
 		oldest: Option<u64>, // None if everything before latest

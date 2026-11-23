@@ -1,7 +1,7 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{collections::{BTreeSet, HashMap}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
-use bile_data::{DataType, DirtyState, Request, diff::{self, BileRegisterDiff}, simple::{self, BileRegisterSimple}};
+use bile_data::{DataType, DirtyState, Request, diff::{self, BileRegisterDiff}, simple_producing::{self, BileRegisterSimpleProducer}, simple_storage::BileAddSimpleStorage};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
@@ -113,29 +113,35 @@ impl DataType for Heightmap {
 #[derive(Component)]
 struct HeightmapSource {
 	sampler: HeightSampler,
-	live: HashSet<TileKey>,
-	tasks: Vec<(TileKey, Task<Heights>)>,
+	live: HashMap<TileKey, BTreeSet<DirtyState>>, // the requests that were not cancelled
+	tasks: Vec<(TileKey, Task<Heights>, DirtyState)>, // and the state of the heights, older if the tile was edited since
 }
 
 impl HeightmapSource {
 	fn spawn(&mut self, tile_key: TileKey) {
 		let sampler = self.sampler.clone();
-		self.tasks.push((tile_key, AsyncComputeTaskPool::get().spawn(async move { sampler.heights(tile_key) })));
+		self.tasks.push((tile_key, AsyncComputeTaskPool::get().spawn(async move { sampler.heights(tile_key) }), DirtyState::UpToDate));
 	}
 }
 
-impl simple::DataProducingNode<Heightmap> for HeightmapSource {
+impl simple_producing::ProducingNodeAPI<Heightmap> for HeightmapSource {
 	fn cost(&self, _request: &Request<Heightmap>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<Heightmap>) {
-		self.live.insert(request.params);
-		self.tasks.retain(|(task_tile_key, _)| *task_tile_key != request.params);
-		self.spawn(request.params);
+		self.live.entry(request.params).or_default().insert(request.allowed_tick);
+		// A running task is not restarted, if it is too old for the request another one starts when it is done
+		if !self.tasks.iter().any(|(task_tile_key, ..)| *task_tile_key == request.params) {
+			self.spawn(request.params);
+		}
 	}
 
-	fn drop(&mut self, tile_key: &TileKey) {
-		self.live.remove(tile_key);
-		self.tasks.retain(|(task_tile_key, _)| task_tile_key != tile_key);
+	fn cancel(&mut self, tile_key: &TileKey, latest: DirtyState, oldest: Option<u64>) {
+		let Some(requests) = self.live.get_mut(tile_key) else { return; };
+		requests.retain(|dirty_state| !dirty_state.is_cancelled_by(latest, oldest));
+		if requests.is_empty() {
+			self.live.remove(tile_key);
+			self.tasks.retain(|(task_tile_key, ..)| task_tile_key != tile_key);
+		}
 	}
 }
 
@@ -161,7 +167,7 @@ fn footprint(tile_key: TileKey) -> Rect {
 fn apply_height_edits(
 	mut field: ResMut<HeightField>,
 	source: Single<&mut HeightmapSource>,
-	mut dirtier: simple::DataDirtier<Heightmap>,
+	mut dirtier: simple_producing::DataDirtier<Heightmap>,
 ) {
 	if field.edited.is_empty() { return; }
 	let edited = std::mem::take(&mut field.edited);
@@ -169,20 +175,24 @@ fn apply_height_edits(
 	let mut source = source.into_inner();
 	source.sampler = field.sampler.clone();
 	let touched = |tile_key: &TileKey| edited.iter().any(|rect| !footprint(*tile_key).intersect(*rect).is_empty());
+	let tick = dirtier.current_tick();
 
-	let restart: Vec<_> = source.tasks.extract_if(.., |(tile_key, _)| touched(tile_key)).map(|(tile_key, _)| tile_key).collect();
-	for tile_key in restart {
-		source.spawn(tile_key);
+	for (_, _, dirty_state) in source.tasks.iter_mut().filter(|(tile_key, ..)| touched(tile_key)) {
+		*dirty_state = (*dirty_state).min(DirtyState::Dirty { tick });
 	}
-	for tile_key in source.live.iter().filter(|tile_key| touched(tile_key)) {
-		dirtier.mark_dirty(tile_key, Some(&raised));
+	for tile_key in source.live.keys().filter(|tile_key| touched(tile_key)) {
+		dirtier.mark_dirty(tile_key, tick, Some(&raised));
 	}
 }
 
-fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer: simple::DataPasser<Heightmap>) {
+fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer: simple_producing::DataPasser<Heightmap>) {
 	let (entity, mut source) = source.into_inner();
-	for (tile_key, task) in source.tasks.extract_if(.., |(_, task)| task.is_finished()) {
-		passer.pass_data(entity, &tile_key, DirtyState::UpToDate, Arc::new(block_on(task)));
+	let finished: Vec<_> = source.tasks.extract_if(.., |(_, task, _)| task.is_finished()).collect();
+	for (tile_key, task, dirty_state) in finished {
+		passer.pass_data(entity, &tile_key, dirty_state, Arc::new(block_on(task)));
+		if source.live.get(&tile_key).and_then(|requests| requests.last()).is_some_and(|&wanted| wanted > dirty_state) {
+			source.spawn(tile_key);
+		}
 	}
 }
 
@@ -199,9 +209,10 @@ impl Plugin for HeightmapPlugin {
 		noise.set_fractal_type(Some(FractalType::FBm));
 		noise.set_fractal_octaves(Some(5));
 		let sampler = HeightSampler { noise: Arc::new(noise), overrides: Arc::default() };
-		app.world_mut().spawn(HeightmapSource { sampler: sampler.clone(), live: HashSet::new(), tasks: Vec::new() });
+		app.world_mut().spawn(HeightmapSource { sampler: sampler.clone(), live: HashMap::new(), tasks: Vec::new() });
 		app.insert_resource(HeightField { sampler, edited: Vec::new(), raised: HashMap::new() });
-		app.register_producer_simple::<Heightmap, HeightmapSource>()
+		app.add_simple_storage::<Heightmap>()
+			.register_producer_simple::<Heightmap, HeightmapSource>()
 			.register_diff_applier::<Heightmap, HeightmapSource>()
 			.add_systems(Update, (apply_height_edits, finish_heightmaps).chain().in_set(HeightmapSystems));
 	}

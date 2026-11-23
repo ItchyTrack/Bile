@@ -13,12 +13,14 @@ pub mod btree_drain;
 // pub mod streaming_producing;
 // pub mod streaming;
 // pub mod gather;
+// #[cfg(test)]
+// mod streaming_tests;
 
 use bevy::prelude::*;
 
 use crate::{setup::BileDataDefaultPlugin};
 
-pub use setup::{StateTick, Request, DirtyState, DataType, BileDataSchedule, BileDataSystemSet};
+pub use setup::{StateTick, Request, DirtyState, DataType, BileDataSchedule, BileDataSystemSet, cancel_range, unheld_ranges};
 
 #[derive(Default)]
 pub struct BileDataPlugin;
