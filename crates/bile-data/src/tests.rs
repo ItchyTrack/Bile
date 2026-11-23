@@ -433,6 +433,28 @@ fn a_cancel_reaches_only_the_fulfillers_it_covers() {
 	assert!(producer(&app, source).cancels.is_empty());
 }
 
+#[test]
+fn a_cancel_keeps_the_fulfiller_whose_data_is_used() {
+	let mut app = sum_app();
+	app.insert_resource(OtherRequester { entity: Entity::PLACEHOLDER, passes: Vec::new() });
+	let entity = app.world().resource_entity::<OtherRequester>().unwrap();
+	app.world_mut().resource_mut::<OtherRequester>().entity = entity;
+	app.register_component_as::<dyn RequesterAPI<Sum>, OtherRequester>();
+	app.insert_resource(OtherFulfiller { cost: 2.0, cancels: Vec::new() });
+	app.register_component_as::<dyn FulfillerAPI<Sum>, OtherFulfiller>();
+	let source = app.world_mut().spawn(Producer::new(1.0)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, UP_TO_DATE);
+	// the other requester asks the other fulfiller, and gets the data of the node
+	app.world_mut().resource_mut::<OtherFulfiller>().cost = 0.5;
+	other_request(&mut app, false, dirty(5));
+	other_request(&mut app, false, dirty(6));
+	pass(&mut app, source, 3, dirty(5), 50);
+	assert_eq!(app.world().resource::<OtherRequester>().passes, vec![50]);
+	cancel(&mut app, a, 3, UP_TO_DATE, None);
+	assert!(producer(&app, source).cancels.is_empty());
+}
+
 // ============================ Diffs ============================
 
 fn diff_app(adder: Adder) -> (App, Entity, Entity, Entity) {
@@ -530,10 +552,11 @@ fn a_late_dirty_is_kept_while_a_diff_applier_works() {
 	mark_dirty(&mut app, 3, 5, Some(1));
 	pass_diffed(&mut app, adder, 3, 37);
 	assert_eq!(events(&app, a).last(), Some(&"dirty 3 5 Some(1)"));
+	// its diff can not be applied after the diff of tick 10, so the node is asked
 	app.world_mut().get_mut::<Adder>(adder).unwrap().applies = true;
 	app.update();
-	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 38"));
-	assert_eq!(producer(&app, source).requests.len(), 1);
+	assert_eq!(events(&app, a).last(), Some(&"dirty 3 5 Some(1)"));
+	assert_eq!(producer(&app, source).requests.len(), 2);
 }
 
 #[test]
@@ -609,6 +632,29 @@ fn a_request_is_not_made_again_if_the_stored_data_is_enough() {
 	app.update();
 	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 36"));
 	assert_eq!(producer(&app, source).requests.len(), 1);
+}
+
+#[test]
+fn a_late_dirty_the_data_has_does_not_dirty_it() {
+	let mut app = sum_app();
+	let source = app.world_mut().spawn(Producer::new(1.0)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	request(&mut app, a, 3, dirty(5));
+	// it has every dirty before tick 5
+	pass(&mut app, source, 3, dirty(5), 40);
+	mark_dirty(&mut app, 3, 3, Some(3));
+	assert_eq!(request(&mut app, a, 3, dirty(5)), Some((40, dirty(5))));
+	assert_eq!(producer(&app, source).requests.len(), 1);
+}
+
+#[test]
+fn a_late_diff_is_not_applied_after_newer_ones() {
+	let (mut app, source, _, a) = diff_app(Adder { cost: 0.5, applies: true });
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((35, UP_TO_DATE)));
+	// from before the diff that was applied
+	mark_dirty(&mut app, 3, 0, Some(1));
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	assert_eq!(producer(&app, source).requests.len(), 2);
 }
 
 #[test]

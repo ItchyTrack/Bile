@@ -254,7 +254,7 @@ impl<DT: ComponentData> StorageFulfillerAPI<DT> for ComponentStorage<DT> {
 		let Some(dirty_state) = self.requests.answered(fulfiller, params, dirty_state) else { return; };
 		if self.entries.get(params).and_then(|entry| entry.stored.as_ref()).is_some_and(|(stored, _)| *stored > dirty_state) { return; }
 		// The wants are not requesters, they get the data at the end of the bile update
-		let requesters = self.requests.pass_data(params, dirty_state);
+		let requesters = self.requests.pass_data(fulfiller, params, dirty_state);
 		storage_params.get::<ComponentFulfillerSystemParams<DT>>().pass_data(requesters, params, dirty_state, &data);
 		self.store(params, dirty_state, data);
 	}
@@ -266,7 +266,7 @@ impl<DT: ComponentData> StorageFulfillerAPI<DT> for ComponentStorage<DT> {
 		last_clean_tick: u64,
 		diff: Option<&DT::Diff>,
 	) {
-		if let Some((dirty_state, _)) = self.entries.get_mut(params).and_then(|entry| entry.stored.as_mut()) {
+		if !self.requests.has_dirty(params, last_clean_tick) && let Some((dirty_state, _)) = self.entries.get_mut(params).and_then(|entry| entry.stored.as_mut()) {
 			*dirty_state = (*dirty_state).min(DirtyState::Dirty { tick: last_clean_tick });
 			self.unsatisfied.insert(params.clone());
 		}

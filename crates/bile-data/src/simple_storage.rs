@@ -23,6 +23,9 @@ struct Requests<DT: DataType> {
 	fulfillers: HashMap<Entity, (BTreeSet<DirtyState>, Option<DirtyState>)>, // Fulfiller -> What was passed on to it that no data of it satisfied yet, and the freshest of that its last data satisfied. It keeps that.
 	diffing: Option<(Entity, Option<DirtyState>, Vec<(u64, Option<DT::Diff>)>)>, // The diff fulfiller that passes the data later, what it was asked for (None if newer data replaced what it works on), and the dirties it was given
 	dirties: Option<Vec<(u64, Option<DT::Diff>)>>, // Every other dirty the stored data lacks, by tick. None if that is not known
+	source: Option<Entity>, // The fulfiller the stored data came from. It keeps something, or its nodes would drop data that is still used.
+	has_below: u64, // The stored data was passed as having every dirty below this tick
+	applied_through: Option<u64>, // The tick of the last diff that was applied to the stored data, an older diff can not be applied after it
 }
 
 impl<DT: DataType> Default for StorageRequests<DT> {
@@ -30,7 +33,7 @@ impl<DT: DataType> Default for StorageRequests<DT> {
 }
 
 impl<DT: DataType> Default for Requests<DT> {
-	fn default() -> Self { Self { requesters: HashMap::default(), fulfillers: HashMap::default(), diffing: None, dirties: None } }
+	fn default() -> Self { Self { requesters: HashMap::default(), fulfillers: HashMap::default(), diffing: None, dirties: None, source: None, has_below: 0, applied_through: None } }
 }
 
 impl<DT: DataType> StorageRequests<DT> {
@@ -66,8 +69,9 @@ impl<DT: DataType> StorageRequests<DT> {
 	}
 	// The first diffs were applied right away. Returns the state of the data now.
 	pub fn applied(&mut self, params: &DT::Params, diffs: usize) -> DirtyState {
-		let dirties = self.requests.get_mut(params).and_then(|requests| requests.dirties.as_mut()).expect("The diffs came from here");
-		dirties.drain(..diffs);
+		let requests = self.requests.get_mut(params).expect("The diffs came from here");
+		let dirties = requests.dirties.as_mut().expect("The diffs came from here");
+		requests.applied_through = dirties.drain(..diffs).last().map(|(tick, _)| tick);
 		self.applied.push(params.clone());
 		state(dirties)
 	}
@@ -80,8 +84,14 @@ impl<DT: DataType> StorageRequests<DT> {
 		let requests = self.requests.get_mut(params)?;
 		if requests.diffing.as_ref().is_some_and(|&(diff_fulfiller, ..)| diff_fulfiller == fulfiller) {
 			// It lacks the dirties it was not given, the state it was passed with means nothing
-			let (_, wanted, _) = requests.diffing.take().expect("It was just found");
-			let dirty_state = state(requests.dirties.as_ref().expect("The diffs came from here"));
+			let (_, wanted, handed) = requests.diffing.take().expect("It was just found");
+			let dirties = requests.dirties.as_mut().expect("The diffs came from here");
+			// An older diff that came meanwhile can not be applied after the ones it was given
+			if let Some(&(last, _)) = handed.last() {
+				requests.applied_through = Some(last);
+				for (_, diff) in dirties.iter_mut().filter(|(tick, _)| *tick <= last) { *diff = None; }
+			}
+			let dirty_state = state(dirties);
 			// A diff applier passes its data once. So what the data is too old for is requested again.
 			if let Some(wanted) = wanted && !dirty_state.satisfies(wanted) { self.fell_short.push(Request::new(params.clone(), wanted)); }
 			return wanted.and(Some(dirty_state));
@@ -90,9 +100,15 @@ impl<DT: DataType> StorageRequests<DT> {
 		if let Some(&wanted) = btree_drain::set_drain_range(passed_on, ..=dirty_state).last() { *used = Some(wanted); }
 		Some(dirty_state)
 	}
-	// New data was stored. Returns the requesters that waited for something it satisfies
-	pub fn pass_data(&mut self, params: &DT::Params, dirty_state: DirtyState) -> Vec<Entity> {
+	// New data of the fulfiller was stored. Returns the requesters that waited for something it satisfies
+	pub fn pass_data(&mut self, fulfiller: Entity, params: &DT::Params, dirty_state: DirtyState) -> Vec<Entity> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
+		// Not for what a diff applier passed, that is still the data of the fulfiller it came from
+		if requests.fulfillers.contains_key(&fulfiller) {
+			requests.source = Some(fulfiller);
+			requests.has_below = match dirty_state { DirtyState::Dirty { tick } => tick, DirtyState::UpToDate => 0 };
+			requests.applied_through = None;
+		}
 		// A diff applier works on older data, what it passes is dropped and what this is not enough for is requested again
 		if let Some((_, wanted, handed)) = &mut requests.diffing && let Some(wanted) = wanted.take() {
 			self.fell_short.push(Request::new(params.clone(), wanted));
@@ -121,10 +137,16 @@ impl<DT: DataType> StorageRequests<DT> {
 	// Returns the requesters that hold the data
 	pub fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>) -> Vec<Entity> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
-		if let Some(dirties) = &mut requests.dirties {
+		if let Some(dirties) = &mut requests.dirties && last_clean_tick >= requests.has_below {
+			// A diff can not be applied after a newer one
+			let diff = diff.filter(|_| requests.applied_through.is_none_or(|applied_through| last_clean_tick > applied_through));
 			dirties.insert(dirties.partition_point(|&(tick, _)| tick <= last_clean_tick), (last_clean_tick, diff.cloned()));
 		}
 		requests.requesters.keys().copied().collect()
+	}
+	// If the stored data was passed as having the dirty already, it came late
+	pub fn has_dirty(&self, params: &DT::Params, last_clean_tick: u64) -> bool {
+		self.requests.get(params).is_some_and(|requests| last_clean_tick < requests.has_below)
 	}
 	// Returns what to cancel at which fulfiller. The params are no longer requested if every requester cancelled.
 	pub fn cancel(&mut self, requester: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) -> Vec<(Entity, DirtyState, Option<u64>)> {
@@ -141,12 +163,13 @@ impl<DT: DataType> StorageRequests<DT> {
 		}
 		// Only what was passed on and nobody waits for anymore. A request served from the storage never reached the
 		// fulfillers, so they keep their last state, or they would drop data that is still used.
-		let Requests { requesters, fulfillers, diffing, dirties } = requests;
+		let Requests { requesters, fulfillers, diffing, dirties, source, .. } = requests;
 		let unwaited = |dirty_state: &DirtyState| is_cancelled(*dirty_state, latest, oldest) && !requesters.values().any(|(waiting, _)| waiting.contains(dirty_state));
 		let mut cancels = Vec::new();
 		if fulfillers.values().any(|(passed_on, used)| used.is_some() || !passed_on.iter().all(unwaited)) {
 			fulfillers.retain(|&fulfiller, (passed_on, used)| {
-				let cancelled: Vec<DirtyState> = passed_on.iter().copied().filter(unwaited).collect();
+				let mut cancelled: Vec<DirtyState> = passed_on.iter().copied().filter(unwaited).collect();
+				if *source == Some(fulfiller) && used.is_none() && cancelled.len() == passed_on.len() { cancelled.clear(); }
 				let held = passed_on.iter().copied().filter(|dirty_state| !cancelled.contains(dirty_state)).chain(*used);
 				let mut ranges = unheld_ranges(held, latest, oldest);
 				ranges.retain(|&(latest, oldest)| cancelled.iter().any(|&dirty_state| is_cancelled(dirty_state, latest, oldest)));
@@ -340,7 +363,7 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 	) {
 		let Some(dirty_state) = self.requests.answered(fulfiller, params, dirty_state) else { return; };
 		if self.data.get(params).is_some_and(|(stored, _)| *stored > dirty_state) { return; }
-		let requesters = self.requests.pass_data(params, dirty_state);
+		let requesters = self.requests.pass_data(fulfiller, params, dirty_state);
 		storage_params.get::<StorageFulfillerSystemParams<DT>>().pass_data(requesters, params, dirty_state, &data);
 		self.data.insert(params.clone(), (dirty_state, Some(data)));
 	}
@@ -352,7 +375,7 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 		last_clean_tick: u64,
 		diff: Option<&DT::Diff>,
 	) {
-		if let Some((dirty_state, _)) = self.data.get_mut(params) {
+		if !self.requests.has_dirty(params, last_clean_tick) && let Some((dirty_state, _)) = self.data.get_mut(params) {
 			*dirty_state = (*dirty_state).min(DirtyState::Dirty { tick: last_clean_tick });
 		}
 		let requesters = self.requests.dirty_data(params, last_clean_tick, diff);
