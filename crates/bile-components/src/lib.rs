@@ -149,7 +149,11 @@ impl<DT: ComponentData> ComponentStorage<DT> {
 		self.unsatisfied.insert(params.clone());
 	}
 	fn want(&mut self, params: &DT::Params, entity: Entity) {
-		self.entries.entry(params.clone()).or_default().wanting.insert(entity);
+		let entry = self.entries.entry(params.clone()).or_default();
+		entry.wanting.insert(entity);
+		// Its request counts right away, so the data is kept if every requester cancels before the Request stage
+		let served = matches!(entry.stored, Some((DirtyState::UpToDate, _)));
+		self.requests.request(self.entity, &Request::new(params.clone(), DirtyState::UpToDate), served);
 		self.moved.insert(params.clone());
 		self.unsatisfied.insert(params.clone());
 	}
@@ -292,6 +296,8 @@ fn pass_applied<DT: ComponentData>(mut storage: ResMut<ComponentStorage<DT>>, mu
 // What the data of a diff applier was too old for
 fn request_again<DT: ComponentData>(mut storage: ResMut<ComponentStorage<DT>>, mut storage_params: DynStorageRequesterParams<DT>) {
 	for request in storage.requests.take_fell_short() {
+		// Not if the stored data is enough by now, the requesters that wait get that in the PassData stage
+		if storage.entries.get(&request.params).and_then(|entry| entry.stored.as_ref()).is_some_and(|(stored, _)| *stored >= request.allowed_tick) { continue; }
 		if storage.requests.is_waited(&request) && !storage.requests.is_in_flight(&request) { storage.fulfill(&mut storage_params, &request); }
 	}
 }

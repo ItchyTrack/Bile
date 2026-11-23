@@ -478,6 +478,35 @@ fn a_request_the_diffed_data_is_too_old_for_is_made_again() {
 }
 
 #[test]
+fn a_cancelled_diff_applier_is_not_asked_again_until_it_passed() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, applies: false });
+	assert_eq!(request(&mut app, a, 3, dirty(2)), None);
+	cancel(&mut app, a, 3, dirty(2), Some(2));
+	mark_dirty(&mut app, 3, 2, Some(1));
+	// it still works on what was cancelled, so the node is asked
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	assert_eq!(producer(&app, source).requests.len(), 2);
+	// and what it passes is not taken for the new request
+	pass_diffed(&mut app, adder, 3, 35);
+	assert_eq!(events(&app, a).last(), Some(&"dirty 3 2 Some(1)"));
+}
+
+#[test]
+fn a_request_is_not_made_again_if_the_stored_data_is_enough() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, applies: false });
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	mark_dirty(&mut app, 3, 2, Some(1));
+	pass_diffed(&mut app, adder, 3, 35);
+	// another node has the rest applied before the request is made again
+	app.world_mut().get_mut::<Adder>(adder).unwrap().applies = true;
+	assert_eq!(request(&mut app, b, 3, UP_TO_DATE), Some((36, UP_TO_DATE)));
+	app.update();
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 36"));
+	assert_eq!(producer(&app, source).requests.len(), 1);
+}
+
+#[test]
 fn applied_diffs_reach_the_nodes_that_wait() {
 	let (mut app, source, adder, a) = diff_app(Adder { cost: 2.0, applies: true });
 	let b = app.world_mut().spawn(Consumer::default()).id();

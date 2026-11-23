@@ -338,6 +338,8 @@ fn pass_applied<DT: DataType>(mut storage: ResMut<Storage<DT>>, mut requesters: 
 // What the data of a diff applier was too old for
 fn request_again<DT: DataType>(mut storage: ResMut<Storage<DT>>, mut storage_params: DynStorageRequesterParams<DT>) {
 	for request in storage.requests.take_fell_short() {
+		// Not if the stored data is enough by now, the requesters that wait get that in the PassData stage
+		if storage.data.get(&request.params).is_some_and(|(stored, _)| *stored >= request.allowed_tick) { continue; }
 		if storage.requests.is_waited(&request) && !storage.requests.is_in_flight(&request) { storage.fulfill(&mut storage_params, &request); }
 	}
 }

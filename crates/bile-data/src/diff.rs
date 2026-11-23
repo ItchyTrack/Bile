@@ -58,7 +58,7 @@ impl<DT: DataType> DynParam<FulfillerParams<DT>> for DiffFulfillerSystemParams<D
 
 #[derive(Resource)]
 pub struct DiffFulfiller<DT: DataType> {
-	applying: HashMap<DT::Params, HashMap<Entity, (u64, DirtyState)>>, // Params -> Diff applying node -> The tick of the last diff it was given, and the requested dirty state
+	applying: HashMap<DT::Params, HashMap<Entity, (u64, Option<DirtyState>)>>, // Params -> Diff applying node -> The tick of the last diff it was given, and the requested dirty state. None if that was cancelled
 }
 
 impl<DT: DataType> Default for DiffFulfiller<DT> {
@@ -73,12 +73,12 @@ impl<DT: DataType> DiffFulfiller<DT> {
 		diff_applying_nodes.iter().filter(|(_, entity)| applying.is_none_or(|applying| !applying.contains_key(entity)))
 			.filter_map(|(node, entity)| Some((node.diff_cost(request, diffs)?, entity))).min_by(|a, b| a.0.total_cmp(&b.0))
 	}
-	// Returns the tick of the last diff the node was given, or None if it was not asked for the data
+	// Returns the tick of the last diff the node was given, or None if it was not asked for the data or that was cancelled
 	pub(crate) fn applied(&mut self, source_entity: Entity, params: &DT::Params) -> Option<u64> {
 		let applying = self.applying.get_mut(params)?;
-		let (last_tick, _) = applying.remove(&source_entity)?;
+		let (last_tick, wanted) = applying.remove(&source_entity)?;
 		if applying.is_empty() { self.applying.remove(params); }
-		Some(last_tick)
+		wanted.and(Some(last_tick))
 	}
 }
 
@@ -103,7 +103,7 @@ impl<DT: DataType> DiffFulfillerAPI<DT> for DiffFulfiller<DT> {
 		let mut diff_applying_nodes = fulfiller_params.get::<DiffFulfillerSystemParams<DT>>();
 		let (_, entity) = self.best_node(&diff_applying_nodes, &request, &diffs)?;
 		if diff_applying_nodes.get_mut(entity).expect("It was just found").0.apply(&request.params, &mut data, diffs) { return Some(data); }
-		self.applying.entry(request.params).or_default().insert(entity, (last_tick, request.allowed_tick));
+		self.applying.entry(request.params).or_default().insert(entity, (last_tick, Some(request.allowed_tick)));
 		None
 	}
 
@@ -114,9 +114,10 @@ impl<DT: DataType> DiffFulfillerAPI<DT> for DiffFulfiller<DT> {
 		latest: DirtyState,
 		oldest: Option<u64>, // None if everything before latest
 	) {
-		let Some(applying) = self.applying.get_mut(params) else { return; };
-		applying.retain(|_, (_, dirty_state)| !dirty_state.is_cancelled_by(latest, oldest));
-		if applying.is_empty() { self.applying.remove(params); }
+		// A node can not be told to stop. So it is not asked again until it passes its data, which is dropped then.
+		for (_, wanted) in self.applying.get_mut(params).into_iter().flat_map(HashMap::values_mut) {
+			if wanted.is_some_and(|wanted| wanted.is_cancelled_by(latest, oldest)) { *wanted = None; }
+		}
 	}
 }
 

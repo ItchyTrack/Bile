@@ -362,6 +362,21 @@ fn a_node_waiting_for_wanted_data_gets_it() {
 }
 
 #[test]
+fn a_want_keeps_the_data_a_node_no_longer_uses() {
+	let (mut app, source, entity) = setup();
+	app.register_consumer_simple::<Num, Consumer>();
+	let consumer = app.world_mut().spawn(Consumer::default()).id();
+	assert_eq!(request(&mut app, consumer), None);
+	pass(&mut app, source, 3, Some(Value(30)));
+	// wanted and no longer used by the node in the same frame
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	cancel(&mut app, consumer);
+	app.update();
+	assert_eq!(app.world().get::<Value>(entity), Some(&Value(30)));
+	assert!(producer(&app, source).cancels.is_empty());
+}
+
+#[test]
 fn component_data_can_be_added_after_its_nodes() {
 	let mut app = App::new();
 	app.add_plugins(BileDataPlugin);
