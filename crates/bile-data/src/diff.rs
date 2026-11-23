@@ -3,7 +3,7 @@ use std::{collections::HashMap, marker::PhantomData};
 use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DirtyState, dyn_system_params::{DynParam, RegisterDynParam}, setup::{DataType, Request}};
+use crate::{DirtyState, cancel_range::is_cancelled, dyn_system_params::{DynParam, RegisterDynParam}, setup::{DataType, Request}};
 use crate::simple_api::{DynFulfillerParams, FulfillerParams};
 
 // ============================ Diff Fulfiller API ============================
@@ -116,7 +116,7 @@ impl<DT: DataType> DiffFulfillerAPI<DT> for DiffFulfiller<DT> {
 	) {
 		// A node can not be told to stop. So it is not asked again until it passes its data, which is dropped then.
 		for (_, wanted) in self.applying.get_mut(params).into_iter().flat_map(HashMap::values_mut) {
-			if wanted.is_some_and(|wanted| wanted.is_cancelled_by(latest, oldest)) { *wanted = None; }
+			if wanted.is_some_and(|wanted| is_cancelled(wanted, latest, oldest)) { *wanted = None; }
 		}
 	}
 }

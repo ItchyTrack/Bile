@@ -1,8 +1,6 @@
-use std::{collections::BTreeSet, hash::Hash, ops::Bound};
+use std::hash::Hash;
 
 use bevy::{app::MainScheduleOrder, ecs::schedule::ScheduleLabel, prelude::*};
-
-use crate::btree_drain;
 
 #[derive(Resource, Default)]
 pub struct StateTick {
@@ -41,64 +39,6 @@ impl DirtyState {
 			(_, DirtyState::UpToDate) => false,
 			(DirtyState::Dirty { tick: a }, DirtyState::Dirty { tick: b }) => a > b,
 		}
-	}
-
-	// If a cancel of oldest..=latest covers it
-	pub fn is_cancelled_by(self, latest: DirtyState, oldest: Option<u64>) -> bool {
-		self <= latest && !matches!((self, oldest), (DirtyState::Dirty { tick }, Some(oldest)) if tick < oldest)
-	}
-}
-
-pub fn cancel_range(latest: DirtyState, oldest: Option<u64>) -> (Bound<DirtyState>, Bound<DirtyState>) {
-	(oldest.map_or(Bound::Unbounded, |oldest| Bound::Included(DirtyState::Dirty { tick: oldest })), Bound::Included(latest))
-}
-
-// The parts of a cancel that cover none of the held states, as (latest, oldest). These can be cancelled further on.
-pub fn unheld_ranges(held: impl IntoIterator<Item = DirtyState>, latest: DirtyState, oldest: Option<u64>) -> Vec<(DirtyState, Option<u64>)> {
-	// UpToDate is the tick after the last tick
-	let position = |state: DirtyState| match state { DirtyState::Dirty { tick } => tick as u128, DirtyState::UpToDate => u64::MAX as u128 + 1 };
-	let state = |position: u128| if position > u64::MAX as u128 { DirtyState::UpToDate } else { DirtyState::Dirty { tick: position as u64 } };
-	let mut held: Vec<u128> = held.into_iter().filter(|held| held.is_cancelled_by(latest, oldest)).map(position).collect();
-	held.sort_unstable();
-	held.dedup();
-	let mut ranges = Vec::new();
-	let mut start = oldest.unwrap_or(0) as u128;
-	for end in held.into_iter().chain([position(latest) + 1]) {
-		if start < end {
-			ranges.push((state(end - 1), (start > 0).then(|| start.min(u64::MAX as u128) as u64)));
-		}
-		start = end + 1;
-	}
-	ranges
-}
-
-// What a client holds at its server for some params: the requests it still waits for, and the wanted state of its
-// latest satisfied request. Older satisfied requests are thrown away.
-#[derive(Default)]
-pub struct Claim {
-	pub waiting: BTreeSet<DirtyState>,
-	pub usage: Option<DirtyState>,
-}
-
-impl Claim {
-	pub fn is_empty(&self) -> bool { self.waiting.is_empty() && self.usage.is_none() }
-	pub fn held(&self) -> impl Iterator<Item = DirtyState> + '_ { self.waiting.iter().copied().chain(self.usage) }
-	pub fn request(&mut self, wanted: DirtyState, served: bool) {
-		if served { self.usage = Some(wanted); } else { self.waiting.insert(wanted); }
-	}
-	// Returns true if the data satisfied a wait, the freshest of them is the usage then
-	pub fn pass(&mut self, dirty_state: DirtyState) -> bool {
-		let satisfied = btree_drain::set_drain_range(&mut self.waiting, ..=dirty_state);
-		let Some(&wanted) = satisfied.last() else { return false; };
-		self.usage = Some(wanted);
-		true
-	}
-	// Returns true if it held something the cancel covers
-	pub fn cancel(&mut self, latest: DirtyState, oldest: Option<u64>) -> bool {
-		let waited = !btree_drain::set_drain_range(&mut self.waiting, cancel_range(latest, oldest)).is_empty();
-		let used = self.usage.is_some_and(|usage| usage.is_cancelled_by(latest, oldest));
-		if used { self.usage = None; }
-		waited || used
 	}
 }
 

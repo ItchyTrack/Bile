@@ -6,7 +6,7 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::diff::DiffFulfillerAPI;
 use crate::dyn_system_params::{DynParam, RegisterDynParam};
-use crate::{btree_drain, unheld_ranges, BileDataSchedule, BileDataSystemSet, Claim, DataType, DirtyState, Request};
+use crate::{btree_drain, cancel_range::{cancel_range, is_cancelled, unheld_ranges}, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request};
 use crate::simple_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams};
 
 // ============================ Storage Requests ============================
@@ -19,8 +19,9 @@ pub struct StorageRequests<DT: DataType> {
 }
 
 struct Requests<DT: DataType> {
-	requesters: HashMap<Entity, Claim>,
-	fulfillers: Claim, // What was passed on to the fulfillers
+	requesters: HashMap<Entity, (BTreeSet<DirtyState>, Option<DirtyState>)>, // Requester -> The dirty states it waits for, and the wanted dirty state it uses
+	passed_on: BTreeSet<DirtyState>, // Passed on to the fulfillers, no data that satisfies them was passed yet
+	used: Option<DirtyState>, // The freshest of the passed on dirty states the last data satisfied. The fulfillers keep that.
 	diffing: BTreeSet<DirtyState>, // What was passed on to a diff applier that passes the data later
 	dirties: Option<Vec<(u64, Option<DT::Diff>)>>, // Every dirty the stored data lacks, by tick. None if that is not known
 }
@@ -30,23 +31,24 @@ impl<DT: DataType> Default for StorageRequests<DT> {
 }
 
 impl<DT: DataType> Default for Requests<DT> {
-	fn default() -> Self { Self { requesters: HashMap::default(), fulfillers: Claim::default(), diffing: BTreeSet::new(), dirties: None } }
+	fn default() -> Self { Self { requesters: HashMap::default(), passed_on: BTreeSet::new(), used: None, diffing: BTreeSet::new(), dirties: None } }
 }
 
 impl<DT: DataType> StorageRequests<DT> {
 	pub fn is_requested(&self, params: &DT::Params) -> bool { self.requests.contains_key(params) }
 	pub fn request(&mut self, requester: Entity, request: &Request<DT>, served: bool) {
-		self.requests.entry(request.params.clone()).or_default().requesters.entry(requester).or_default().request(request.allowed_tick, served);
+		let (waiting, usage) = self.requests.entry(request.params.clone()).or_default().requesters.entry(requester).or_default();
+		if served { *usage = Some(request.allowed_tick); } else { waiting.insert(request.allowed_tick); }
 	}
 	pub fn is_in_flight(&self, request: &Request<DT>) -> bool {
-		self.requests.get(&request.params).is_some_and(|requests| requests.fulfillers.waiting.contains(&request.allowed_tick) || requests.diffing.contains(&request.allowed_tick))
+		self.requests.get(&request.params).is_some_and(|requests| requests.passed_on.contains(&request.allowed_tick) || requests.diffing.contains(&request.allowed_tick))
 	}
 	pub fn is_waited(&self, request: &Request<DT>) -> bool {
-		self.requests.get(&request.params).is_some_and(|requests| requests.requesters.values().any(|claim| claim.waiting.contains(&request.allowed_tick)))
+		self.requests.get(&request.params).is_some_and(|requests| requests.requesters.values().any(|(waiting, _)| waiting.contains(&request.allowed_tick)))
 	}
 	pub fn passed_on(&mut self, request: &Request<DT>, diffing: bool) {
 		let requests = self.requests.entry(request.params.clone()).or_default();
-		if diffing { requests.diffing.insert(request.allowed_tick); } else { requests.fulfillers.request(request.allowed_tick, false); }
+		if diffing { requests.diffing.insert(request.allowed_tick); } else { requests.passed_on.insert(request.allowed_tick); }
 	}
 	// The diffs that bring the stored data to a state the request allows, and the tick of the last of them. These are
 	// the first dirties, whole ticks up to the first dirty without a diff.
@@ -77,7 +79,7 @@ impl<DT: DataType> StorageRequests<DT> {
 				state(&dirties[dirties.partition_point(|&(dirty_tick, _)| dirty_tick < tick)..]),
 			_ => dirty_state,
 		};
-		requests.fulfillers.pass(dirty_state);
+		if let Some(&wanted) = btree_drain::set_drain_range(&mut requests.passed_on, ..=dirty_state).last() { requests.used = Some(wanted); }
 		// A diff applier passes its data once. So what the data is too old for is requested again.
 		btree_drain::set_drain_range(&mut requests.diffing, ..=dirty_state);
 		self.fell_short.extend(std::mem::take(&mut requests.diffing).into_iter().map(|wanted| Request::new(params.clone(), wanted)));
@@ -96,7 +98,11 @@ impl<DT: DataType> StorageRequests<DT> {
 	// Returns the requesters that waited for something the stored data satisfies
 	pub fn satisfied(&mut self, params: &DT::Params, dirty_state: DirtyState) -> Vec<Entity> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
-		requests.requesters.iter_mut().filter_map(|(&requester, claim)| claim.pass(dirty_state).then_some(requester)).collect()
+		// The freshest request of a requester the data satisfies is what it uses
+		requests.requesters.iter_mut().filter_map(|(&requester, (waiting, usage))| {
+			*usage = Some(*btree_drain::set_drain_range(waiting, ..=dirty_state).last()?);
+			Some(requester)
+		}).collect()
 	}
 	// Returns the requesters that hold the data
 	pub fn dirty_data(&mut self, params: &DT::Params, last_clean_tick: u64, diff: Option<&DT::Diff>) -> Vec<Entity> {
@@ -109,28 +115,31 @@ impl<DT: DataType> StorageRequests<DT> {
 	// Returns what to cancel at the fulfillers. The params are no longer requested if every requester cancelled.
 	pub fn cancel(&mut self, requester: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) -> Vec<(DirtyState, Option<u64>)> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
-		let Some(claim) = requests.requesters.get_mut(&requester) else { return Vec::new(); };
-		if !claim.cancel(latest, oldest) { return Vec::new(); }
-		if claim.is_empty() { requests.requesters.remove(&requester); }
+		let Some((waiting, usage)) = requests.requesters.get_mut(&requester) else { return Vec::new(); };
+		let waited = !btree_drain::set_drain_range(waiting, cancel_range(latest, oldest)).is_empty();
+		let used = usage.is_some_and(|usage| is_cancelled(usage, latest, oldest));
+		if used { *usage = None; }
+		if !waited && !used { return Vec::new(); }
+		if waiting.is_empty() && usage.is_none() { requests.requesters.remove(&requester); }
 		if requests.requesters.is_empty() {
-			let held = !requests.fulfillers.is_empty() || !requests.diffing.is_empty();
+			let held = !requests.passed_on.is_empty() || requests.used.is_some() || !requests.diffing.is_empty();
 			self.requests.remove(params);
 			return if held { vec![(DirtyState::UpToDate, None)] } else { Vec::new() };
 		}
 		// Only what was passed on and nobody waits for anymore. A request served from the storage never reached the
 		// fulfillers, so they keep their last state, or they would drop data that is still used.
-		let Requests { requesters, fulfillers, diffing, .. } = requests;
-		let unwaited = |dirty_state: &DirtyState| dirty_state.is_cancelled_by(latest, oldest) && !requesters.values().any(|claim| claim.waiting.contains(dirty_state));
-		let mut cancelled: Vec<DirtyState> = fulfillers.waiting.iter().copied().filter(unwaited).collect();
-		if fulfillers.usage.is_none() && cancelled.len() == fulfillers.waiting.len() { cancelled.clear(); }
+		let Requests { requesters, passed_on, used, diffing, .. } = requests;
+		let unwaited = |dirty_state: &DirtyState| is_cancelled(*dirty_state, latest, oldest) && !requesters.values().any(|(waiting, _)| waiting.contains(dirty_state));
+		let mut cancelled: Vec<DirtyState> = passed_on.iter().copied().filter(unwaited).collect();
+		if used.is_none() && cancelled.len() == passed_on.len() { cancelled.clear(); }
 		cancelled.extend(diffing.iter().copied().filter(unwaited));
-		let held = fulfillers.waiting.iter().chain(diffing.iter()).copied().filter(|dirty_state| !cancelled.contains(dirty_state)).chain(fulfillers.usage);
+		let held = passed_on.iter().chain(diffing.iter()).copied().filter(|dirty_state| !cancelled.contains(dirty_state)).chain(*used);
 		let mut ranges = unheld_ranges(held, latest, oldest);
-		ranges.retain(|&(latest, oldest)| cancelled.iter().any(|dirty_state| dirty_state.is_cancelled_by(latest, oldest)));
-		// What can not be cancelled without the usage stays in flight
-		let is_cancelled = |dirty_state: &DirtyState| ranges.iter().any(|&(latest, oldest)| dirty_state.is_cancelled_by(latest, oldest));
-		fulfillers.waiting.retain(|dirty_state| !is_cancelled(dirty_state));
-		diffing.retain(|dirty_state| !is_cancelled(dirty_state));
+		ranges.retain(|&(latest, oldest)| cancelled.iter().any(|&dirty_state| is_cancelled(dirty_state, latest, oldest)));
+		// What can not be cancelled without what is used stays in flight
+		let sent = |dirty_state: &DirtyState| ranges.iter().any(|&(latest, oldest)| is_cancelled(*dirty_state, latest, oldest));
+		passed_on.retain(|dirty_state| !sent(dirty_state));
+		diffing.retain(|dirty_state| !sent(dirty_state));
 		ranges
 	}
 }

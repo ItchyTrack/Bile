@@ -1,9 +1,9 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::{collections::{BTreeSet, HashMap}, marker::PhantomData};
 
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{unheld_ranges, Claim, DataType, DirtyState, Request, StateTick, diff::DiffFulfiller, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{btree_drain, cancel_range::{cancel_range, is_cancelled, unheld_ranges}, DataType, DirtyState, Request, StateTick, diff::DiffFulfiller, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::simple_api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI};
 
 // ============================ Producing API ============================
@@ -28,9 +28,12 @@ fn best_node<DT: DataType>(producing_nodes: &Query<(Entity, One<&'static mut dyn
 	producing_nodes.iter().filter_map(|(entity, node)| Some((node.cost(request)?, entity))).min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
+// The dirty states that were requested and no data satisfied yet, and the freshest of the dirty states the last data satisfied
+type Asked = (BTreeSet<DirtyState>, Option<DirtyState>);
+
 #[derive(Resource)]
 pub struct FulfillerBookkeeping<DT: DataType> {
-	asked: HashMap<DT::Params, (Claim, HashMap<Entity, Claim>)>, // Params -> What the storage holds here, Producing node -> What it was asked for
+	asked: HashMap<DT::Params, (Asked, HashMap<Entity, Asked>)>, // Params -> What the storage asked for, Producing node -> What it was asked for
 }
 
 impl<DT: DataType> Default for FulfillerBookkeeping<DT> {
@@ -54,8 +57,8 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 		let mut producing_nodes = fulfiller_params.get::<FulfillerSystemParams<DT>>();
 		let Some((_, entity)) = best_node(&producing_nodes, &request) else { return; };
 		let (storage, nodes) = self.asked.entry(request.params.clone()).or_default();
-		storage.request(request.allowed_tick, false);
-		nodes.entry(entity).or_default().request(request.allowed_tick, false);
+		storage.0.insert(request.allowed_tick);
+		nodes.entry(entity).or_default().0.insert(request.allowed_tick);
 		producing_nodes.get_mut(entity).expect("It was just found").1.request(request);
 	}
 
@@ -66,22 +69,27 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 		latest: DirtyState,
 		oldest: Option<u64>, // None if everything before latest
 	) {
-		let Some((storage, nodes)) = self.asked.get_mut(params) else { return; };
-		storage.cancel(latest, oldest);
+		let Some(((waiting, used), nodes)) = self.asked.get_mut(params) else { return; };
+		btree_drain::set_drain_range(waiting, cancel_range(latest, oldest));
+		if used.is_some_and(|used| is_cancelled(used, latest, oldest)) { *used = None; }
 		let mut producing_nodes = fulfiller_params.get::<FulfillerSystemParams<DT>>();
-		// The storage has one usage for the data of every node. So a node keeps its usage until the storage holds
-		// nothing here anymore, then every node is told to stop.
-		let released = storage.is_empty();
-		nodes.retain(|&entity, claim| {
-			let ranges = if released { vec![(DirtyState::UpToDate, None)] } else { unheld_ranges(claim.usage, latest, oldest) };
-			for (latest, oldest) in ranges {
-				if claim.cancel(latest, oldest) && let Ok((_, mut node)) = producing_nodes.get_mut(entity) {
+		// The storage keeps one dirty state for the data of every node. So a node keeps what its data satisfied until
+		// the storage asks for nothing here anymore, then every node is told to stop.
+		if waiting.is_empty() && used.is_none() {
+			for &entity in nodes.keys() {
+				if let Ok((_, mut node)) = producing_nodes.get_mut(entity) { node.cancel(params, DirtyState::UpToDate, None); }
+			}
+			self.asked.remove(params);
+			return;
+		}
+		nodes.retain(|&entity, (waiting, used)| {
+			for (latest, oldest) in unheld_ranges(*used, latest, oldest) {
+				if !btree_drain::set_drain_range(waiting, cancel_range(latest, oldest)).is_empty() && let Ok((_, mut node)) = producing_nodes.get_mut(entity) {
 					node.cancel(params, latest, oldest);
 				}
 			}
-			!claim.is_empty()
+			!waiting.is_empty() || used.is_some()
 		});
-		if released { self.asked.remove(params); }
 	}
 }
 
@@ -99,9 +107,11 @@ impl<DT: DataType> DataPasser<'_, '_, DT> {
 	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
 		// Only from the nodes that were asked for the data
 		let Some((storage, nodes)) = self.fulfiller.as_mut().and_then(|fulfiller| fulfiller.asked.get_mut(params)) else { return; };
-		let Some(claim) = nodes.get_mut(&source_entity) else { return; };
-		claim.pass(dirty_state);
-		storage.pass(dirty_state);
+		let Some(node) = nodes.get_mut(&source_entity) else { return; };
+		// The freshest of the requests the data satisfies is what the data is kept for
+		for (waiting, used) in [node, storage] {
+			if let Some(&wanted) = btree_drain::set_drain_range(waiting, ..=dirty_state).last() { *used = Some(wanted); }
+		}
 		self.storage.pass_data(&mut self.storage_params, params, dirty_state, data);
 	}
 	// A diff applying node passes the data it did not apply the diffs to right away

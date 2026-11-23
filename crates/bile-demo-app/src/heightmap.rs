@@ -1,7 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{BTreeSet, HashMap}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
-use bile_data::{Claim, DataType, DirtyState, Request, diff::{self, BileRegisterDiff}, simple_producing::{self, BileRegisterSimpleProducer}, simple_storage::BileAddSimpleStorage};
+use bile_data::{DataType, DirtyState, Request, btree_drain, cancel_range::is_cancelled, diff::{self, BileRegisterDiff}, simple_producing::{self, BileRegisterSimpleProducer}, simple_storage::BileAddSimpleStorage};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
@@ -113,7 +113,7 @@ impl DataType for Heightmap {
 #[derive(Component)]
 struct HeightmapSource {
 	sampler: HeightSampler,
-	live: HashMap<TileKey, Claim>, // what it was asked for and not cancelled
+	live: HashMap<TileKey, (BTreeSet<DirtyState>, Option<DirtyState>)>, // the requests it still works on, and the freshest request its last heights were for
 	tasks: Vec<(TileKey, Task<Heights>, DirtyState)>, // and the state of the heights, older if the tile was edited since
 }
 
@@ -128,7 +128,7 @@ impl simple_producing::ProducingNodeAPI<Heightmap> for HeightmapSource {
 	fn cost(&self, _request: &Request<Heightmap>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<Heightmap>) {
-		self.live.entry(request.params).or_default().request(request.allowed_tick, false);
+		self.live.entry(request.params).or_default().0.insert(request.allowed_tick);
 		// A running task is not restarted, if it is too old for the request another one starts when it is done
 		if !self.tasks.iter().any(|(task_tile_key, ..)| *task_tile_key == request.params) {
 			self.spawn(request.params);
@@ -136,9 +136,10 @@ impl simple_producing::ProducingNodeAPI<Heightmap> for HeightmapSource {
 	}
 
 	fn cancel(&mut self, tile_key: &TileKey, latest: DirtyState, oldest: Option<u64>) {
-		let Some(requests) = self.live.get_mut(tile_key) else { return; };
-		requests.cancel(latest, oldest);
-		if requests.is_empty() {
+		let Some((waiting, used)) = self.live.get_mut(tile_key) else { return; };
+		waiting.retain(|&dirty_state| !is_cancelled(dirty_state, latest, oldest));
+		if used.is_some_and(|used| is_cancelled(used, latest, oldest)) { *used = None; }
+		if waiting.is_empty() && used.is_none() {
 			self.live.remove(tile_key);
 			self.tasks.retain(|(task_tile_key, ..)| task_tile_key != tile_key);
 		}
@@ -190,9 +191,9 @@ fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer:
 	let finished: Vec<_> = source.tasks.extract_if(.., |(_, task, _)| task.is_finished()).collect();
 	for (tile_key, task, dirty_state) in finished {
 		passer.pass_data(entity, &tile_key, dirty_state, Arc::new(block_on(task)));
-		let Some(requests) = source.live.get_mut(&tile_key) else { continue; };
-		requests.pass(dirty_state);
-		if !requests.waiting.is_empty() {
+		let Some((waiting, used)) = source.live.get_mut(&tile_key) else { continue; };
+		if let Some(&wanted) = btree_drain::set_drain_range(waiting, ..=dirty_state).last() { *used = Some(wanted); }
+		if !waiting.is_empty() {
 			source.spawn(tile_key);
 		}
 	}
