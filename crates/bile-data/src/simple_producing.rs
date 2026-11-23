@@ -3,7 +3,7 @@ use std::{collections::HashMap, marker::PhantomData};
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{unheld_ranges, Claim, DataType, DirtyState, Request, StateTick, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{unheld_ranges, Claim, DataType, DirtyState, Request, StateTick, diff::DiffFulfiller, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::simple_api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI};
 
 // ============================ Producing API ============================
@@ -90,6 +90,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
 	fulfiller: Option<ResMut<'w, FulfillerBookkeeping<DT>>>,
+	diff_fulfiller: Option<ResMut<'w, DiffFulfiller<DT>>>,
 	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
 	storage_params: DynStorageFulfillerParams<'w, 's, DT>,
 }
@@ -102,6 +103,12 @@ impl<DT: DataType> DataPasser<'_, '_, DT> {
 		claim.pass(dirty_state);
 		storage.pass(dirty_state);
 		self.storage.pass_data(&mut self.storage_params, params, dirty_state, data);
+	}
+	// A diff applying node passes the data it did not apply the diffs to right away
+	pub fn pass_diffed_data(&mut self, source_entity: Entity, params: &DT::Params, data: DT::Data) {
+		let Some(last_tick) = self.diff_fulfiller.as_mut().and_then(|diff_fulfiller| diff_fulfiller.applied(source_entity, params)) else { return; };
+		// It has every dirty up to the tick of the last diff, as all the dirties of a tick come before any work of that tick
+		self.storage.pass_data(&mut self.storage_params, params, DirtyState::Dirty { tick: last_tick + 1 }, data);
 	}
 }
 // ============================ Data Dirtier ============================

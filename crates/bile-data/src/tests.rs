@@ -89,6 +89,9 @@ fn cancel(app: &mut App, node: Entity, params: u32, latest: DirtyState, oldest: 
 fn pass(app: &mut App, source: Entity, params: u32, dirty_state: DirtyState, data: u32) {
 	app.world_mut().run_system_once(move |mut passer: DataPasser<Sum>| passer.pass_data(source, &params, dirty_state, data)).unwrap();
 }
+fn pass_diffed(app: &mut App, source: Entity, params: u32, data: u32) {
+	app.world_mut().run_system_once(move |mut passer: DataPasser<Sum>| passer.pass_diffed_data(source, &params, data)).unwrap();
+}
 fn mark_dirty(app: &mut App, params: u32, last_clean_tick: u64, diff: Option<u32>) {
 	app.world_mut().run_system_once(move |mut dirtier: DataDirtier<Sum>| dirtier.mark_dirty(&params, last_clean_tick, diff.as_ref())).unwrap();
 }
@@ -409,16 +412,17 @@ fn diffs_are_applied_instead_of_producing_again() {
 	mark_dirty(&mut app, 3, 2, Some(2));
 	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((38, UP_TO_DATE)));
 	assert_eq!(producer(&app, source).requests.len(), 1);
-	// a dirty without a diff ends the run
+	// the diffs before a dirty without a diff are applied for a request they satisfy
 	mark_dirty(&mut app, 3, 3, Some(1));
-	mark_dirty(&mut app, 3, 3, None);
-	mark_dirty(&mut app, 3, 4, Some(1));
+	mark_dirty(&mut app, 3, 4, None);
+	mark_dirty(&mut app, 3, 5, Some(1));
+	assert_eq!(request(&mut app, a, 3, dirty(4)), Some((39, dirty(4))));
 	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
-	assert_eq!(producer(&app, source).requests.len(), 2);
-	// until up to date data is passed
+	assert_eq!(producer(&app, source).requests, vec![(3, UP_TO_DATE), (3, UP_TO_DATE)]);
+	// up to date data has every dirty
 	pass(&mut app, source, 3, UP_TO_DATE, 100);
 	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 100"));
-	mark_dirty(&mut app, 3, 5, Some(5));
+	mark_dirty(&mut app, 3, 6, Some(5));
 	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((105, UP_TO_DATE)));
 	assert_eq!(producer(&app, source).requests.len(), 2);
 }
@@ -431,12 +435,46 @@ fn diffs_are_only_applied_when_that_is_cheaper() {
 }
 
 #[test]
-fn diffs_that_are_not_applied_are_produced_again() {
-	let (mut app, source, _, a) = diff_app(Adder { cost: 0.5, applies: false });
-	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+fn data_that_arrives_dirty_keeps_the_diffs_it_lacks() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 2.0, applies: true });
+	mark_dirty(&mut app, 3, 2, Some(1));
+	assert_eq!(request(&mut app, a, 3, dirty(2)), None);
+	// the data has the first diff but not the second
+	pass(&mut app, source, 3, dirty(2), 35);
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 Dirty { tick: 2 } 35"));
+	app.world_mut().get_mut::<Adder>(adder).unwrap().cost = 0.5;
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((36, UP_TO_DATE)));
 	assert_eq!(producer(&app, source).requests.len(), 2);
-	pass(&mut app, source, 3, UP_TO_DATE, 40);
-	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 40"));
+}
+
+#[test]
+fn diffs_can_be_applied_later() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, applies: false });
+	assert_eq!(request(&mut app, a, 3, dirty(2)), None);
+	assert_eq!(producer(&app, source).requests.len(), 1);
+	// a dirty arrives while it works
+	mark_dirty(&mut app, 3, 2, Some(1));
+	pass_diffed(&mut app, adder, 3, 35);
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 Dirty { tick: 2 } 35"));
+	// it was asked once
+	pass_diffed(&mut app, adder, 3, 99);
+	app.world_mut().get_mut::<Adder>(adder).unwrap().applies = true;
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), Some((36, UP_TO_DATE)));
+	assert_eq!(producer(&app, source).requests.len(), 1);
+}
+
+#[test]
+fn a_request_the_diffed_data_is_too_old_for_is_made_again() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, applies: false });
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	// a dirty arrives while it works, so its data is not up to date
+	mark_dirty(&mut app, 3, 2, Some(1));
+	pass_diffed(&mut app, adder, 3, 35);
+	assert_eq!(events(&app, a).last(), Some(&"dirty 3 2 Some(1)"));
+	app.world_mut().get_mut::<Adder>(adder).unwrap().applies = true;
+	app.update();
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 36"));
+	assert_eq!(producer(&app, source).requests.len(), 1);
 }
 
 #[test]

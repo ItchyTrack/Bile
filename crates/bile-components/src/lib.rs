@@ -12,7 +12,7 @@ use bile_data::{
 	BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request,
 	dyn_system_params::{DynParam, RegisterDynParam},
 	simple_api::{DynStorageFulfillerParams, DynStorageRequesterParams, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams},
-	simple_storage::{Fulfillers, Requesters, StorageRequests},
+	simple_storage::{Fulfillers, Fulfilling, Requesters, StorageRequests},
 };
 
 #[cfg(test)]
@@ -165,6 +165,22 @@ impl<DT: ComponentData> ComponentStorage<DT> {
 			self.released.insert(params.clone());
 		}
 	}
+	// Passes the request on to the fulfillers. Returns the data if diffs were applied to the stored data right away.
+	fn fulfill(&mut self, storage_params: &mut DynStorageRequesterParams<DT>, request: &Request<DT>) -> Option<(DT::Data, DirtyState)> {
+		let (mut fulfillers, components) = storage_params.get::<ComponentRequesterSystemParams<DT>>();
+		let stale = self.get(&components, &request.params).and_then(|(_, data)| Some((data, self.requests.diffs(request)?)));
+		let last_tick = stale.as_ref().map(|(_, (_, last_tick))| *last_tick);
+		let data = match fulfillers.request(request.clone(), stale) {
+			Fulfilling::Applied(data) => data,
+			fulfilling => {
+				self.requests.passed_on(request, matches!(fulfilling, Fulfilling::Applying));
+				return None;
+			}
+		};
+		let dirty_state = self.requests.applied(&request.params, last_tick.expect("Diffs were applied"));
+		self.store(&request.params, dirty_state, data.clone());
+		Some((data, dirty_state))
+	}
 	// Drops the entry if nothing wants or requests it anymore
 	fn release_unused(&mut self, params: &DT::Params) {
 		if self.entries.get(params).is_some_and(|entry| entry.wanting.is_empty()) && !self.requests.is_requested(params) {
@@ -192,27 +208,18 @@ impl<DT: ComponentData> StorageRequesterAPI<DT> for ComponentStorage<DT> {
 		requester: Entity,
 		request: &Request<DT>,
 	) -> Option<(DT::Data, DirtyState)> {
-		let (mut fulfillers, components) = storage_params.get::<ComponentRequesterSystemParams<DT>>();
-		let stored = self.get(&components, &request.params);
-		if let Some((dirty_state, data)) = &stored && *dirty_state >= request.allowed_tick {
+		let (_, components) = storage_params.get::<ComponentRequesterSystemParams<DT>>();
+		if let Some((dirty_state, data)) = self.get(&components, &request.params) && dirty_state >= request.allowed_tick {
 			self.requests.request(requester, request, true);
-			return Some((data.clone(), *dirty_state));
+			return Some((data, dirty_state));
 		}
 		if self.requests.is_in_flight(request) {
 			self.requests.request(requester, request, false);
 			return None;
 		}
-		let stale = stored.and_then(|(_, data)| Some((data, self.requests.diffs(&request.params)?)));
-		let applied = fulfillers.request(request.clone(), stale);
-		self.requests.request(requester, request, applied.is_some());
-		let Some(data) = applied else {
-			self.requests.passed_on(request);
-			return None;
-		};
-		// The diffs were applied right away
-		self.requests.applied(&request.params);
-		self.store(&request.params, DirtyState::UpToDate, data.clone());
-		Some((data, DirtyState::UpToDate))
+		let served = self.fulfill(storage_params, request);
+		self.requests.request(requester, request, served.is_some());
+		served
 	}
 
 	fn cancel(
@@ -241,7 +248,7 @@ impl<DT: ComponentData> StorageFulfillerAPI<DT> for ComponentStorage<DT> {
 		dirty_state: DirtyState,
 		data: DT::Data,
 	) {
-		if !self.requests.answered(params, dirty_state) { return; }
+		let Some(dirty_state) = self.requests.answered(params, dirty_state) else { return; };
 		if self.entries.get(params).and_then(|entry| entry.stored.as_ref()).is_some_and(|(stored, _)| *stored > dirty_state) { return; }
 		// The wants are not requesters, they get the data at the end of the bile update
 		let requesters = self.requests.pass_data(params, dirty_state);
@@ -260,7 +267,7 @@ impl<DT: ComponentData> StorageFulfillerAPI<DT> for ComponentStorage<DT> {
 			*dirty_state = (*dirty_state).min(DirtyState::Dirty { tick: last_clean_tick });
 			self.unsatisfied.insert(params.clone());
 		}
-		let requesters = self.requests.dirty_data(params, diff);
+		let requesters = self.requests.dirty_data(params, last_clean_tick, diff);
 		storage_params.get::<ComponentFulfillerSystemParams<DT>>().dirty_data(requesters, params, last_clean_tick, diff);
 	}
 }
@@ -279,6 +286,13 @@ fn pass_applied<DT: ComponentData>(mut storage: ResMut<ComponentStorage<DT>>, mu
 		let Some((dirty_state, data)) = storage.get(&components, &params) else { continue; };
 		let satisfied = storage.requests.satisfied(&params, dirty_state);
 		requesters.pass_data(satisfied, &params, dirty_state, &data);
+	}
+}
+
+// What the data of a diff applier was too old for
+fn request_again<DT: ComponentData>(mut storage: ResMut<ComponentStorage<DT>>, mut storage_params: DynStorageRequesterParams<DT>) {
+	for request in storage.requests.take_fell_short() {
+		if storage.requests.is_waited(&request) && !storage.requests.is_in_flight(&request) { storage.fulfill(&mut storage_params, &request); }
 	}
 }
 
@@ -379,7 +393,7 @@ impl AddComponentData for App {
 				BileDataSchedule,
 				(
 					cancel_unwanted::<DT>.in_set(BileDataSystemSet::Cancel),
-					request_wanted::<DT>.in_set(BileDataSystemSet::Request),
+					(request_again::<DT>, request_wanted::<DT>).chain().in_set(BileDataSystemSet::Request),
 					pass_applied::<DT>.in_set(BileDataSystemSet::PassData),
 					update_components::<DT>.in_set(BileDataSystemSet::Store),
 				),

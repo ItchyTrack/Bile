@@ -239,13 +239,13 @@ fn component_can_only_come_from_one_data_type() {
 }
 
 #[derive(Component)]
-struct Adder;
+struct Adder(bool); // if it applies the diffs right away
 
 impl DiffApplyingNode<Num> for Adder {
 	fn diff_cost(&self, _request: &Request<Num>, _diffs: &[u32]) -> Option<f32> { Some(0.5) }
 	fn apply(&mut self, _params: &u32, data: &mut Option<Value>, diffs: Vec<u32>) -> bool {
-		data.as_mut().unwrap().0 += diffs.iter().sum::<u32>();
-		true
+		if self.0 { data.as_mut().unwrap().0 += diffs.iter().sum::<u32>(); }
+		self.0
 	}
 }
 
@@ -253,7 +253,7 @@ impl DiffApplyingNode<Num> for Adder {
 fn diffs_are_applied_to_the_component() {
 	let (mut app, source, entity) = setup();
 	app.register_diff_applier::<Num, Adder>();
-	app.world_mut().spawn(Adder);
+	app.world_mut().spawn(Adder(true));
 	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
 	app.update();
 	pass(&mut app, source, 3, Some(Value(30)));
@@ -263,13 +263,30 @@ fn diffs_are_applied_to_the_component() {
 	app.update();
 	assert_eq!(app.world().get::<Value>(entity), Some(&Value(37)));
 	assert_eq!(producer(&app, source).requests, vec![3]);
-	// a dirty without a diff ends the run and the data is requested again
+	// the diffs can not be applied past a dirty without a diff, so the data is requested again
 	dirty(&mut app, Some(1));
 	dirty(&mut app, None);
 	app.update();
 	assert_eq!(app.world().get::<Value>(entity), Some(&Value(37)));
 	assert_eq!(producer(&app, source).requests, vec![3, 3]);
 	assert!(producer(&app, source).cancels.is_empty());
+}
+
+#[test]
+fn diffs_applied_later_reach_the_component() {
+	let (mut app, source, entity) = setup();
+	app.register_diff_applier::<Num, Adder>();
+	let adder = app.world_mut().spawn(Adder(false)).id();
+	want::<Num>(&mut app.world_mut().entity_mut(entity), 3);
+	app.update();
+	pass(&mut app, source, 3, Some(Value(30)));
+	app.update();
+	dirty(&mut app, Some(5));
+	app.update();
+	assert_eq!(producer(&app, source).requests, vec![3]);
+	app.world_mut().run_system_once(move |mut passer: DataPasser<Num>| passer.pass_diffed_data(adder, &3, Some(Value(35)))).unwrap();
+	app.update();
+	assert_eq!(app.world().get::<Value>(entity), Some(&Value(35)));
 }
 
 #[derive(Component, Default)]
