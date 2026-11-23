@@ -74,6 +74,19 @@ fn producer(app: &App, node: Entity) -> &Producer {
 // ============================ Streaming ============================
 
 #[test]
+fn a_finished_stream_takes_nothing_more() {
+	let mut app = streaming_app();
+	let source = app.world_mut().spawn(Producer::new(Some(1.0))).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	let stream = request(&mut app, a, 3, UP_TO_DATE);
+	push(&mut app, source, stream, 3, 10);
+	finish(&mut app, source, stream, 3);
+	finish(&mut app, source, stream, 3);
+	push(&mut app, source, stream, 3, 20);
+	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10", "finish 3"]);
+}
+
+#[test]
 fn the_cheapest_node_streams_to_the_consumer_in_order() {
 	let mut app = streaming_app();
 	let expensive = app.world_mut().spawn(Producer::new(Some(2.0))).id();

@@ -43,7 +43,7 @@ fn best_node<DT: DataType>(producing_nodes: &Query<(Entity, One<&'static mut dyn
 // The cheapest node streams the data
 #[derive(Resource)]
 pub struct FulfillerBookkeeping<DT: DataType> {
-	asked: HashMap<DT::Params, HashMap<StreamId, (DirtyState, Entity)>>, // Params -> Stream -> The allowed tick it was requested with, and the node that streams it
+	asked: HashMap<DT::Params, HashMap<StreamId, (DirtyState, Entity, bool)>>, // Params -> Stream -> The allowed tick it was requested with, the node that streams it, and if it still streams
 }
 
 impl<DT: DataType> Default for FulfillerBookkeeping<DT> {
@@ -66,7 +66,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 	) {
 		let mut producing_nodes = fulfiller_params.get::<FulfillerSystemParams<DT>>();
 		let Some((_, entity)) = best_node(&producing_nodes, &request) else { return; };
-		self.asked.entry(request.params.clone()).or_default().insert(stream_id, (request.allowed_tick, entity));
+		self.asked.entry(request.params.clone()).or_default().insert(stream_id, (request.allowed_tick, entity, true));
 		producing_nodes.get_mut(entity).expect("It was just found").1.request(stream_id, request);
 	}
 	fn cancel(
@@ -78,7 +78,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 	) {
 		let Some(streams) = self.asked.get_mut(params) else { return; };
 		let mut nodes = HashSet::new();
-		streams.retain(|_, &mut (allowed_tick, entity)| {
+		streams.retain(|_, &mut (allowed_tick, entity, _)| {
 			if !is_cancelled(allowed_tick, latest, oldest) { return true; }
 			nodes.insert(entity);
 			false
@@ -95,26 +95,31 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
-	fulfiller: Option<Res<'w, FulfillerBookkeeping<DT>>>,
+	fulfiller: Option<ResMut<'w, FulfillerBookkeeping<DT>>>,
 	gather: Option<ResMut<'w, GatherFulfiller<DT>>>,
 	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
 	storage_params: DynStorageFulfillerParams<'w, 's, DT>,
 }
 
 impl<DT: DataType> DataPasser<'_, '_, DT> {
-	// Only from the nodes that were asked for the stream
-	fn is_asked(&self, source_entity: Entity, stream_id: StreamId, params: &DT::Params) -> bool {
-		self.fulfiller.as_ref().and_then(|fulfiller| fulfiller.asked.get(params)?.get(&stream_id)).is_some_and(|&(_, entity)| entity == source_entity)
+	// Only from the node that was asked for the stream, until it finished. Returns if it still streams, to finish it.
+	fn asked(&mut self, source_entity: Entity, stream_id: StreamId, params: &DT::Params) -> Option<&mut bool> {
+		let (_, entity, streaming) = self.fulfiller.as_mut()?.asked.get_mut(params)?.get_mut(&stream_id)?;
+		(*entity == source_entity && *streaming).then_some(streaming)
 	}
 	pub fn push(&mut self, source_entity: Entity, stream_id: StreamId, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
 		let gathered = self.gather.as_ref().is_some_and(|gather| gather.is_streaming(source_entity, stream_id, params));
-		if !gathered && !self.is_asked(source_entity, stream_id, params) { return; }
+		if !gathered && self.asked(source_entity, stream_id, params).is_none() { return; }
 		self.storage.push(&mut self.storage_params, stream_id, params, dirty_state, data);
 	}
 	pub fn finish(&mut self, source_entity: Entity, stream_id: StreamId, params: &DT::Params) {
 		// A gathered stream is finished when every node of it finished
 		let gathered = self.gather.as_mut().and_then(|gather| gather.finish(source_entity, stream_id, params));
-		if gathered == Some(false) || gathered.is_none() && !self.is_asked(source_entity, stream_id, params) { return; }
+		if gathered == Some(false) { return; }
+		if gathered.is_none() {
+			let Some(streaming) = self.asked(source_entity, stream_id, params) else { return; };
+			*streaming = false;
+		}
 		self.storage.finish(&mut self.storage_params, stream_id, params);
 	}
 }
