@@ -25,7 +25,7 @@ impl<DT: DataType> DynParam<RequesterParams<DT>> for RequesterSystemParams<DT> {
 #[derive(Resource)]
 pub struct RequesterBookkeeping<DT: DataType> {
 	waiting: HashMap<DT::Params, (HashMap<Entity, BTreeSet<DirtyState>>, BTreeMap<DirtyState, HashSet<Entity>>)>,
-	usages: HashMap<DT::Params, HashMap<Entity, DirtyState>>,
+	usages: HashMap<DT::Params, HashMap<Entity, DirtyState>>, // Params -> Consuming node -> Wanted dirty state
 }
 
 impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
@@ -57,8 +57,7 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 	) {
 		let Some(usages) = self.usages.get_mut(params) else { return; };
 		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
-		for (&usage, dirty_state) in usages {
-			if matches!(dirty_state, DirtyState::UpToDate) { *dirty_state = DirtyState::Dirty { tick: last_clean_tick }; }
+		for (&usage, _wanted_dirty_state) in usages {
 			let Ok(mut node) = consuming_nodes.get_mut(usage) else { continue; };
 			node.dirty_data(params, last_clean_tick, diff);
 		}
@@ -85,8 +84,8 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 	}
 	pub fn cancel(&mut self, requester_node: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) {
 		let used = self.requester.usages.get_mut(params).map_or_default(|usages| 'ret: {
-			let Some(&dirty_state) = usages.get(&requester_node) else { break 'ret 0; };
-			if dirty_state > latest || matches!((dirty_state, oldest), (DirtyState::Dirty { tick }, Some(oldest)) if tick < oldest) { break 'ret 0; }
+			let Some(&wanted_dirty_state) = usages.get(&requester_node) else { break 'ret 0; };
+			if wanted_dirty_state > latest || matches!((wanted_dirty_state, oldest), (DirtyState::Dirty { tick }, Some(oldest)) if tick < oldest) { break 'ret 0; }
 			if usages.len() == 1 {
 				break 'ret -1;
 			}
@@ -124,7 +123,6 @@ pub trait BileRegisterSimpleConsumer {
 	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self
 	where DT: DataType, C: Component + ConsumingNodeAPI<DT>;
 }
-
 
 impl BileRegisterSimpleConsumer for App {
 	fn register_consumer_simple<DT, C>(&mut self) -> &mut Self

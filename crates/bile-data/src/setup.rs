@@ -1,20 +1,15 @@
-use std::{hash::Hash, sync::atomic::{AtomicU64, Ordering}};
+use std::hash::Hash;
 
 use bevy::{app::MainScheduleOrder, ecs::schedule::ScheduleLabel, prelude::*};
 
 #[derive(Resource, Default)]
 pub struct StateTick {
-	current_tick: AtomicU64, // atomic so that everything that dirties can update it
+	current_tick: u64, // Update once per bile schedule run
 }
 
 impl StateTick {
 	pub fn current_tick(&self) -> u64 {
-		self.current_tick.load(Ordering::Relaxed)
-	}
-
-	// Returns the tick before the update
-	pub(crate) fn _update(&self) -> u64 {
-		self.current_tick.fetch_add(1, Ordering::Relaxed)
+		self.current_tick
 	}
 }
 
