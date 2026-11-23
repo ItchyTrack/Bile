@@ -173,15 +173,13 @@ impl<DT: ComponentData> ComponentStorage<DT> {
 	fn fulfill(&mut self, storage_params: &mut DynStorageRequesterParams<DT>, request: &Request<DT>) -> Option<(DT::Data, DirtyState)> {
 		let (mut fulfillers, components) = storage_params.get::<ComponentRequesterSystemParams<DT>>();
 		let stale = self.get(&components, &request.params).and_then(|(_, data)| Some((data, self.requests.diffs(request)?)));
-		let last_tick = stale.as_ref().map(|(_, (_, last_tick))| *last_tick);
+		let diffs = stale.as_ref().map_or(0, |(_, diffs)| diffs.len());
 		let data = match fulfillers.request(request.clone(), stale) {
 			Fulfilling::Applied(data) => data,
-			fulfilling => {
-				self.requests.passed_on(request, matches!(fulfilling, Fulfilling::Applying));
-				return None;
-			}
+			Fulfilling::Applying(diff_fulfiller) => { self.requests.diffing(request, diff_fulfiller, diffs); return None; }
+			Fulfilling::Requested(fulfiller) => { self.requests.passed_on(request, fulfiller); return None; }
 		};
-		let dirty_state = self.requests.applied(&request.params, last_tick.expect("Diffs were applied"));
+		let dirty_state = self.requests.applied(&request.params, diffs);
 		self.store(&request.params, dirty_state, data.clone());
 		Some((data, dirty_state))
 	}
@@ -238,8 +236,8 @@ impl<DT: ComponentData> StorageRequesterAPI<DT> for ComponentStorage<DT> {
 		self.release_unused(params);
 		if cancel.is_empty() { return; }
 		let (mut fulfillers, _) = storage_params.get::<ComponentRequesterSystemParams<DT>>();
-		for (latest, oldest) in cancel {
-			fulfillers.cancel(params, latest, oldest);
+		for (fulfiller, latest, oldest) in cancel {
+			fulfillers.cancel(fulfiller, params, latest, oldest);
 		}
 	}
 }
@@ -248,11 +246,12 @@ impl<DT: ComponentData> StorageFulfillerAPI<DT> for ComponentStorage<DT> {
 	fn pass_data(
 		&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
+		fulfiller: Entity,
 		params: &DT::Params,
 		dirty_state: DirtyState,
 		data: DT::Data,
 	) {
-		let Some(dirty_state) = self.requests.answered(params, dirty_state) else { return; };
+		let Some(dirty_state) = self.requests.answered(fulfiller, params, dirty_state) else { return; };
 		if self.entries.get(params).and_then(|entry| entry.stored.as_ref()).is_some_and(|(stored, _)| *stored > dirty_state) { return; }
 		// The wants are not requesters, they get the data at the end of the bile update
 		let requesters = self.requests.pass_data(params, dirty_state);

@@ -73,6 +73,7 @@ pub trait StorageFulfillerAPI<DT: DataType> {
 	fn pass_data(
 		&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
+		fulfiller: Entity,
 		params: &DT::Params,
 		dirty_state: DirtyState,
 		data: DT::Data,

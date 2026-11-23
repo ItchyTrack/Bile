@@ -1,7 +1,7 @@
 use bevy::ecs::{resource::IsResource, system::RunSystemOnce};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{diff::{BileRegisterDiff, DiffApplyingNode}, simple_api::{DynRequesterParams, DynStorageRequesterParams, RequesterAPI, StorageRequesterAPI}, *};
+use crate::{diff::{BileRegisterDiff, DiffApplyingNode}, simple_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageRequesterAPI}, *};
 use crate::simple_consuming::{BileRegisterSimpleConsumer, ConsumingNodeAPI, Requester};
 use crate::simple_producing::{BileRegisterSimpleProducer, DataDirtier, DataPasser, ProducingNodeAPI};
 use crate::simple_storage::BileAddSimpleStorage;
@@ -327,7 +327,7 @@ impl RequesterAPI<Sum> for OtherRequester {
 	fn dirty_data(&mut self, _requester_params: &mut DynRequesterParams<Sum>, _params: &u32, _last_clean_tick: u64, _diff: Option<&u32>) {}
 }
 
-fn other_request(app: &mut App, cancel: bool) -> Option<(u32, DirtyState)> {
+fn other_request(app: &mut App, cancel: bool, dirty_state: DirtyState) -> Option<(u32, DirtyState)> {
 	app.world_mut()
 		.run_system_once(move |
 			mut storage: Single<One<&mut dyn StorageRequesterAPI<Sum>>, With<IsResource>>,
@@ -336,10 +336,10 @@ fn other_request(app: &mut App, cancel: bool) -> Option<(u32, DirtyState)> {
 		| {
 			let entity = requester.single_mut().unwrap().entity;
 			if cancel {
-				storage.cancel(&mut storage_params, entity, &3, UP_TO_DATE, None);
+				storage.cancel(&mut storage_params, entity, &3, dirty_state, None);
 				return None;
 			}
-			storage.request(&mut storage_params, entity, &Request::new(3, UP_TO_DATE))
+			storage.request(&mut storage_params, entity, &Request::new(3, dirty_state))
 		})
 		.unwrap()
 }
@@ -353,19 +353,19 @@ fn requesters_do_not_cancel_each_other() {
 	app.register_component_as::<dyn RequesterAPI<Sum>, OtherRequester>();
 	let source = app.world_mut().spawn(Producer::new(1.0)).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
-	assert_eq!(other_request(&mut app, false), None);
+	assert_eq!(other_request(&mut app, false, UP_TO_DATE), None);
 	request(&mut app, a, 3, UP_TO_DATE);
 	assert_eq!(producer(&app, source).requests.len(), 1);
 	// it gets nothing it no longer asks for
-	other_request(&mut app, true);
+	other_request(&mut app, true, UP_TO_DATE);
 	assert!(producer(&app, source).cancels.is_empty());
 	pass(&mut app, source, 3, UP_TO_DATE, 30);
 	assert_eq!(events(&app, a), vec!["pass 3 UpToDate 30"]);
 	assert!(app.world().resource::<OtherRequester>().passes.is_empty());
-	assert_eq!(other_request(&mut app, false), Some((30, UP_TO_DATE)));
+	assert_eq!(other_request(&mut app, false, UP_TO_DATE), Some((30, UP_TO_DATE)));
 	cancel(&mut app, a, 3, UP_TO_DATE, None);
 	assert!(producer(&app, source).cancels.is_empty());
-	other_request(&mut app, true);
+	other_request(&mut app, true, UP_TO_DATE);
 	assert_eq!(producer(&app, source).cancels, vec![(3, UP_TO_DATE, None)]);
 }
 
@@ -379,7 +379,7 @@ fn a_pass_reaches_only_the_requesters_that_wait() {
 	let source = app.world_mut().spawn(Producer::new(1.0)).id();
 	let a = app.world_mut().spawn(Consumer::default()).id();
 	request(&mut app, a, 3, UP_TO_DATE);
-	other_request(&mut app, false);
+	other_request(&mut app, false, UP_TO_DATE);
 	pass(&mut app, source, 3, UP_TO_DATE, 30);
 	assert_eq!(events(&app, a), vec!["pass 3 UpToDate 30"]);
 	assert_eq!(app.world().resource::<OtherRequester>().passes, vec![30]);
@@ -388,6 +388,49 @@ fn a_pass_reaches_only_the_requesters_that_wait() {
 	pass(&mut app, source, 3, UP_TO_DATE, 31);
 	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 31"));
 	assert_eq!(app.world().resource::<OtherRequester>().passes, vec![30]);
+}
+
+#[derive(Resource)]
+struct OtherFulfiller { cost: f32, cancels: Vec<(DirtyState, Option<u64>)> }
+impl FulfillerAPI<Sum> for OtherFulfiller {
+	fn cost(&self, _fulfiller_params: &mut DynFulfillerParams<Sum>, _request: &Request<Sum>) -> Option<f32> { Some(self.cost) }
+	fn request(&mut self, _fulfiller_params: &mut DynFulfillerParams<Sum>, _request: Request<Sum>) {}
+	fn cancel(&mut self, _fulfiller_params: &mut DynFulfillerParams<Sum>, _params: &u32, latest: DirtyState, oldest: Option<u64>) { self.cancels.push((latest, oldest)); }
+}
+
+fn other_pass(app: &mut App, fulfiller: Entity, dirty_state: DirtyState, data: u32) {
+	app.world_mut()
+		.run_system_once(move |mut storage: Single<One<&mut dyn StorageFulfillerAPI<Sum>>, With<IsResource>>, mut storage_params: DynStorageFulfillerParams<Sum>| {
+			storage.pass_data(&mut storage_params, fulfiller, &3, dirty_state, data);
+		})
+		.unwrap();
+}
+
+#[test]
+fn a_cancel_reaches_only_the_fulfillers_it_covers() {
+	let mut app = sum_app();
+	app.insert_resource(OtherRequester { entity: Entity::PLACEHOLDER, passes: Vec::new() });
+	let entity = app.world().resource_entity::<OtherRequester>().unwrap();
+	app.world_mut().resource_mut::<OtherRequester>().entity = entity;
+	app.register_component_as::<dyn RequesterAPI<Sum>, OtherRequester>();
+	app.insert_resource(OtherFulfiller { cost: 2.0, cancels: Vec::new() });
+	app.register_component_as::<dyn FulfillerAPI<Sum>, OtherFulfiller>();
+	let other = app.world().resource_entity::<OtherFulfiller>().unwrap();
+	let source = app.world_mut().spawn(Producer::new(1.0)).id();
+	let a = app.world_mut().spawn(Consumer::default()).id();
+	// a keeps the data of the node
+	request(&mut app, a, 3, dirty(10));
+	pass(&mut app, source, 3, UP_TO_DATE, 30);
+	mark_dirty(&mut app, 3, 20, None);
+	// the other requester gets newer data from the other fulfiller
+	app.world_mut().resource_mut::<OtherFulfiller>().cost = 0.5;
+	other_request(&mut app, false, UP_TO_DATE);
+	other_pass(&mut app, other, UP_TO_DATE, 31);
+	mark_dirty(&mut app, 3, 21, None);
+	assert_eq!(other_request(&mut app, false, dirty(22)), None);
+	other_request(&mut app, true, dirty(22));
+	assert_eq!(app.world().resource::<OtherFulfiller>().cancels, vec![(dirty(22), None)]);
+	assert!(producer(&app, source).cancels.is_empty());
 }
 
 // ============================ Diffs ============================
@@ -476,6 +519,67 @@ fn a_request_the_diffed_data_is_too_old_for_is_made_again() {
 	app.update();
 	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 36"));
 	assert_eq!(producer(&app, source).requests.len(), 1);
+}
+
+#[test]
+fn a_late_dirty_is_kept_while_a_diff_applier_works() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, applies: false });
+	mark_dirty(&mut app, 3, 10, Some(2));
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	// the dirty of an earlier tick arrives late, the data it passes lacks it
+	mark_dirty(&mut app, 3, 5, Some(1));
+	pass_diffed(&mut app, adder, 3, 37);
+	assert_eq!(events(&app, a).last(), Some(&"dirty 3 5 Some(1)"));
+	app.world_mut().get_mut::<Adder>(adder).unwrap().applies = true;
+	app.update();
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 38"));
+	assert_eq!(producer(&app, source).requests.len(), 1);
+}
+
+#[test]
+fn older_data_leaves_the_diff_applier_working() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, applies: false });
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	// the node passes data older than the stored data
+	pass(&mut app, source, 3, dirty(0), 29);
+	app.update();
+	assert_eq!(producer(&app, source).requests.len(), 1);
+	pass_diffed(&mut app, adder, 3, 35);
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 35"));
+}
+
+#[test]
+fn newer_data_drops_what_the_diff_applier_passes() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 0.5, applies: false });
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	mark_dirty(&mut app, 3, 2, Some(1));
+	assert_eq!(request(&mut app, b, 3, dirty(2)), None);
+	// newer data arrives while it works, what it passes is based on the older data
+	pass(&mut app, source, 3, dirty(2), 40);
+	pass_diffed(&mut app, adder, 3, 35);
+	assert_eq!(request(&mut app, b, 3, dirty(2)), Some((40, dirty(2))));
+	// what the newer data is not enough for is requested again
+	app.world_mut().get_mut::<Adder>(adder).unwrap().applies = true;
+	app.update();
+	assert_eq!(events(&app, a).last(), Some(&"pass 3 UpToDate 41"));
+	assert_eq!(producer(&app, source).requests.len(), 2);
+}
+
+#[test]
+fn a_pass_keeps_the_dirty_state_it_came_with() {
+	let (mut app, source, adder, a) = diff_app(Adder { cost: 2.0, applies: true });
+	let b = app.world_mut().spawn(Consumer::default()).id();
+	assert_eq!(request(&mut app, a, 3, UP_TO_DATE), None);
+	// the node knows of a dirty at tick 5 the storage did not get yet
+	pass(&mut app, source, 3, dirty(5), 40);
+	assert_eq!(events(&app, a).last(), Some(&"dirty 3 1 Some(5)"));
+	assert_eq!(request(&mut app, b, 3, dirty(5)), Some((40, dirty(5))));
+	// so no diff is applied past it
+	app.world_mut().get_mut::<Adder>(adder).unwrap().cost = 0.5;
+	mark_dirty(&mut app, 3, 7, Some(2));
+	assert_eq!(request(&mut app, b, 3, dirty(7)), None);
+	assert_eq!(producer(&app, source).requests.len(), 3);
 }
 
 #[test]

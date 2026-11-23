@@ -25,7 +25,6 @@ pub trait DiffFulfillerAPI<DT: DataType> {
 		request: Request<DT>,
 		data: DT::Data,
 		diffs: Vec<DT::Diff>,
-		last_tick: u64, // The tick of the last diff
 	) -> Option<DT::Data>;
 	fn cancel(
 		&mut self,
@@ -58,11 +57,8 @@ impl<DT: DataType> DynParam<FulfillerParams<DT>> for DiffFulfillerSystemParams<D
 
 #[derive(Resource)]
 pub struct DiffFulfiller<DT: DataType> {
-	applying: HashMap<DT::Params, HashMap<Entity, (u64, Option<DirtyState>)>>, // Params -> Diff applying node -> The tick of the last diff it was given, and the requested dirty state. None if that was cancelled
-}
-
-impl<DT: DataType> Default for DiffFulfiller<DT> {
-	fn default() -> Self { Self { applying: HashMap::default() } }
+	pub(crate) entity: Entity, // The resource entity, the storage knows the diff results by it
+	applying: HashMap<DT::Params, HashMap<Entity, Option<DirtyState>>>, // Params -> Diff applying node -> The requested dirty state, None if that was cancelled
 }
 
 impl<DT: DataType> DiffFulfiller<DT> {
@@ -73,12 +69,12 @@ impl<DT: DataType> DiffFulfiller<DT> {
 		diff_applying_nodes.iter().filter(|(_, entity)| applying.is_none_or(|applying| !applying.contains_key(entity)))
 			.filter_map(|(node, entity)| Some((node.diff_cost(request, diffs)?, entity))).min_by(|a, b| a.0.total_cmp(&b.0))
 	}
-	// Returns the tick of the last diff the node was given, or None if it was not asked for the data or that was cancelled
-	pub(crate) fn applied(&mut self, source_entity: Entity, params: &DT::Params) -> Option<u64> {
-		let applying = self.applying.get_mut(params)?;
-		let (last_tick, wanted) = applying.remove(&source_entity)?;
+	// If the node was asked for the data and that was not cancelled
+	pub(crate) fn applied(&mut self, source_entity: Entity, params: &DT::Params) -> bool {
+		let Some(applying) = self.applying.get_mut(params) else { return false; };
+		let wanted = applying.remove(&source_entity).flatten();
 		if applying.is_empty() { self.applying.remove(params); }
-		wanted.and(Some(last_tick))
+		wanted.is_some()
 	}
 }
 
@@ -98,12 +94,11 @@ impl<DT: DataType> DiffFulfillerAPI<DT> for DiffFulfiller<DT> {
 		request: Request<DT>,
 		mut data: DT::Data,
 		diffs: Vec<DT::Diff>,
-		last_tick: u64,
 	) -> Option<DT::Data> {
 		let mut diff_applying_nodes = fulfiller_params.get::<DiffFulfillerSystemParams<DT>>();
 		let (_, entity) = self.best_node(&diff_applying_nodes, &request, &diffs)?;
 		if diff_applying_nodes.get_mut(entity).expect("It was just found").0.apply(&request.params, &mut data, diffs) { return Some(data); }
-		self.applying.entry(request.params).or_default().insert(entity, (last_tick, Some(request.allowed_tick)));
+		self.applying.entry(request.params).or_default().insert(entity, Some(request.allowed_tick));
 		None
 	}
 
@@ -115,7 +110,7 @@ impl<DT: DataType> DiffFulfillerAPI<DT> for DiffFulfiller<DT> {
 		oldest: Option<u64>, // None if everything before latest
 	) {
 		// A node can not be told to stop. So it is not asked again until it passes its data, which is dropped then.
-		for (_, wanted) in self.applying.get_mut(params).into_iter().flat_map(HashMap::values_mut) {
+		for wanted in self.applying.get_mut(params).into_iter().flat_map(HashMap::values_mut) {
 			if wanted.is_some_and(|wanted| is_cancelled(wanted, latest, oldest)) { *wanted = None; }
 		}
 	}
@@ -130,8 +125,12 @@ impl BileRegisterDiff for App {
 	fn register_diff_applier<DT, C>(&mut self) -> &mut Self
 	where DT: DataType, C: Component + DiffApplyingNode<DT>,
 	{
-		self.init_resource::<DiffFulfiller<DT>>()
-			.register_component_as::<dyn DiffApplyingNode<DT>, C>()
+		if !self.world().contains_resource::<DiffFulfiller<DT>>() {
+			self.insert_resource(DiffFulfiller::<DT> { entity: Entity::PLACEHOLDER, applying: HashMap::default() });
+			let entity = self.world().resource_entity::<DiffFulfiller<DT>>().expect("It was just inserted");
+			self.world_mut().resource_mut::<DiffFulfiller<DT>>().entity = entity;
+		}
+		self.register_component_as::<dyn DiffApplyingNode<DT>, C>()
 			.register_component_as::<dyn DiffFulfillerAPI<DT>, DiffFulfiller<DT>>()
 			.register_dyn_param::<FulfillerParams<DT>, DiffFulfillerSystemParams<DT>>()
 	}
