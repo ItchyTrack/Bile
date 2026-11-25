@@ -3,8 +3,9 @@ use std::{collections::{BTreeSet, HashMap}, marker::PhantomData};
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, DataType, DirtyState, Request, StateTick, diff::DiffFulfiller, dyn_system_params::{DynParam, RegisterDynParam}};
-use crate::simple_api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI};
+use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, DataType, DirtyState, Request, StateTick, dyn_system_params::{DynParam, RegisterDynParam}};
+use super::api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI};
+use super::diff::DiffFulfiller;
 
 // ============================ Producing API ============================
 

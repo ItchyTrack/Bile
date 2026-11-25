@@ -1,9 +1,12 @@
 use bevy::ecs::system::RunSystemOnce;
+use bevy::prelude::*;
 
-use crate::{gather::BileRegisterGather, streaming_api::StreamId, *};
-use crate::streaming_consuming::{BileRegisterStreamingConsumer, ConsumingNodeAPI, Requester};
-use crate::streaming_producing::{BileRegisterStreamingProducer, DataDirtier, DataPasser, ProducingNodeAPI};
-use crate::streaming_storage::BileAddStreamingStorage;
+use crate::{BileDataPlugin, DataType, DirtyState, Request};
+
+use super::{gather::BileRegisterGather, api::StreamId};
+use super::consuming::{BileRegisterStreamingConsumer, ConsumingNodeAPI, Requester};
+use super::producing::{BileRegisterStreamingProducer, DataDirtier, DataPasser, ProducingNodeAPI};
+use super::storage::BileAddStreamingStorage;
 
 const UP_TO_DATE: DirtyState = DirtyState::UpToDate;
 const fn dirty(tick: u64) -> DirtyState { DirtyState::Dirty { tick } }

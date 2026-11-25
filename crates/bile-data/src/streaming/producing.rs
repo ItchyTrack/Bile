@@ -3,8 +3,9 @@ use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, StateTick, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}, gather::GatherFulfiller};
-use crate::streaming_api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI, StreamId};
+use crate::{DataType, DirtyState, Request, StateTick, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}};
+use super::api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI, StreamId};
+use super::gather::GatherFulfiller;
 
 // ============================ Producing API ============================
 

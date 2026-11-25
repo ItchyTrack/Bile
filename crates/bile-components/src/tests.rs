@@ -1,9 +1,9 @@
 use bevy::ecs::system::RunSystemOnce;
 use bile_data::{
 	BileDataPlugin,
-	diff::{BileRegisterDiff, DiffApplyingNode},
-	simple_consuming::{BileRegisterSimpleConsumer, ConsumingNodeAPI, Requester},
-	simple_producing::{BileRegisterSimpleProducer, DataDirtier, DataPasser, ProducingNodeAPI},
+	simple::diff::{BileRegisterDiff, DiffApplyingNode},
+	simple::consuming::{BileRegisterSimpleConsumer, ConsumingNodeAPI, Requester},
+	simple::producing::{BileRegisterSimpleProducer, DataDirtier, DataPasser, ProducingNodeAPI},
 };
 
 use crate::*;

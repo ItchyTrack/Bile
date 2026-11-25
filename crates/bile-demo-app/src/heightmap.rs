@@ -1,7 +1,7 @@
 use std::{collections::{BTreeSet, HashMap}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
-use bile_data::{DataType, DirtyState, Request, btree_drain, cancel_range::in_cancel_range, diff::{self, BileRegisterDiff}, simple_producing::{self, BileRegisterSimpleProducer}, simple_storage::BileAddSimpleStorage};
+use bile_data::{DataType, DirtyState, Request, btree_drain, cancel_range::in_cancel_range, simple::{self, diff::BileRegisterDiff, producing::BileRegisterSimpleProducer, storage::BileAddSimpleStorage}};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
@@ -124,7 +124,7 @@ impl HeightmapSource {
 	}
 }
 
-impl simple_producing::ProducingNodeAPI<Heightmap> for HeightmapSource {
+impl simple::producing::ProducingNodeAPI<Heightmap> for HeightmapSource {
 	fn cost(&self, _request: &Request<Heightmap>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<Heightmap>) {
@@ -146,7 +146,7 @@ impl simple_producing::ProducingNodeAPI<Heightmap> for HeightmapSource {
 	}
 }
 
-impl diff::DiffApplyingNode<Heightmap> for HeightmapSource {
+impl simple::diff::DiffApplyingNode<Heightmap> for HeightmapSource {
 	fn diff_cost(&self, _request: &Request<Heightmap>, _diffs: &[Raised]) -> Option<f32> { Some(0.5) }
 
 	fn apply(&mut self, _tile_key: &TileKey, heights: &mut Arc<Heights>, diffs: Vec<Raised>) -> bool {
@@ -168,7 +168,7 @@ fn footprint(tile_key: TileKey) -> Rect {
 fn apply_height_edits(
 	mut field: ResMut<HeightField>,
 	source: Single<&mut HeightmapSource>,
-	mut dirtier: simple_producing::DataDirtier<Heightmap>,
+	mut dirtier: simple::producing::DataDirtier<Heightmap>,
 ) {
 	if field.edited.is_empty() { return; }
 	let edited = std::mem::take(&mut field.edited);
@@ -186,7 +186,7 @@ fn apply_height_edits(
 	}
 }
 
-fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer: simple_producing::DataPasser<Heightmap>) {
+fn finish_heightmaps(source: Single<(Entity, &mut HeightmapSource)>, mut passer: simple::producing::DataPasser<Heightmap>) {
 	let (entity, mut source) = source.into_inner();
 	let finished: Vec<_> = source.tasks.extract_if(.., |(_, task, _)| task.is_finished()).collect();
 	for (tile_key, task, dirty_state) in finished {

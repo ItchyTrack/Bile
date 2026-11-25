@@ -8,7 +8,7 @@ use bevy::{
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, simple_consuming::{self, BileRegisterSimpleConsumer}, simple_producing::{self, BileRegisterSimpleProducer}};
+use bile_data::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, simple::{self, consuming::BileRegisterSimpleConsumer, producing::BileRegisterSimpleProducer}};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
 use crate::{heightmap::{Heightmap, Heights, Raised}, terrain::TerrainClass};
@@ -47,7 +47,7 @@ struct GrassMeshNode {
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
 
-impl simple_producing::ProducingNodeAPI<GrassMesh> for GrassMeshNode {
+impl simple::producing::ProducingNodeAPI<GrassMesh> for GrassMeshNode {
 	fn cost(&self, _request: &Request<GrassMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<GrassMesh>) {
@@ -65,7 +65,7 @@ impl simple_producing::ProducingNodeAPI<GrassMesh> for GrassMeshNode {
 	}
 }
 
-impl simple_consuming::ConsumingNodeAPI<Heightmap> for GrassMeshNode {
+impl simple::consuming::ConsumingNodeAPI<Heightmap> for GrassMeshNode {
 	fn pass_data(&mut self, tile_key: &TileKey, _dirty_state: DirtyState, heights: &Arc<Heights>) {
 		self.ready.push((*tile_key, heights.clone()));
 	}
@@ -78,7 +78,7 @@ impl simple_consuming::ConsumingNodeAPI<Heightmap> for GrassMeshNode {
 	}
 }
 
-fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: simple_producing::DataDirtier<GrassMesh>) {
+fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: simple::producing::DataDirtier<GrassMesh>) {
 	for (tile_key, last_clean_tick) in node.into_inner().dirtied.drain(..) {
 		dirtier.mark_dirty(&tile_key, last_clean_tick, None);
 	}
@@ -86,8 +86,8 @@ fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: simple_prod
 
 fn update_grass_meshes(
 	node: Single<(Entity, &mut GrassMeshNode)>,
-	mut heightmaps: simple_consuming::Requester<Heightmap>,
-	mut passer: simple_producing::DataPasser<GrassMesh>,
+	mut heightmaps: simple::consuming::Requester<Heightmap>,
+	mut passer: simple::producing::DataPasser<GrassMesh>,
 	mut meshes: ResMut<Assets<Mesh>>,
 ) {
 	let (entity, mut node) = node.into_inner();

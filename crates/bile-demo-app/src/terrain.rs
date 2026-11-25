@@ -8,7 +8,7 @@ use bevy::{
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, simple_consuming::{self, BileRegisterSimpleConsumer}, simple_producing::{self, BileRegisterSimpleProducer}};
+use bile_data::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, simple::{self, producing::BileRegisterSimpleProducer, consuming::BileRegisterSimpleConsumer}};
 use bile_math::NonZeroRegion;
 use bile_scene::NodeBounds;
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, RegisterTileClass, TileKey};
@@ -57,7 +57,7 @@ struct TerrainMeshNode {
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
 
-impl simple_producing::ProducingNodeAPI<TerrainMesh> for TerrainMeshNode {
+impl simple::producing::ProducingNodeAPI<TerrainMesh> for TerrainMeshNode {
 	fn cost(&self, _request: &Request<TerrainMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<TerrainMesh>) {
@@ -75,7 +75,7 @@ impl simple_producing::ProducingNodeAPI<TerrainMesh> for TerrainMeshNode {
 	}
 }
 
-impl simple_consuming::ConsumingNodeAPI<Heightmap> for TerrainMeshNode {
+impl simple::consuming::ConsumingNodeAPI<Heightmap> for TerrainMeshNode {
 	fn pass_data(&mut self, tile_key: &TileKey, _dirty_state: DirtyState, heights: &Arc<Heights>) {
 		self.ready.push((*tile_key, heights.clone()));
 	}
@@ -88,7 +88,7 @@ impl simple_consuming::ConsumingNodeAPI<Heightmap> for TerrainMeshNode {
 	}
 }
 
-fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: simple_producing::DataDirtier<TerrainMesh>) {
+fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: simple::producing::DataDirtier<TerrainMesh>) {
 	for (tile_key, last_clean_tick) in node.into_inner().dirtied.drain(..) {
 		dirtier.mark_dirty(&tile_key, last_clean_tick, None);
 	}
@@ -96,8 +96,8 @@ fn dirty_terrain_meshes(node: Single<&mut TerrainMeshNode>, mut dirtier: simple_
 
 fn update_terrain_meshes(
 	node: Single<(Entity, &mut TerrainMeshNode)>,
-	mut heightmaps: simple_consuming::Requester<Heightmap>,
-	mut passer: simple_producing::DataPasser<TerrainMesh>,
+	mut heightmaps: simple::consuming::Requester<Heightmap>,
+	mut passer: simple::producing::DataPasser<TerrainMesh>,
 	mut meshes: ResMut<Assets<Mesh>>,
 ) {
 	let (entity, mut node) = node.into_inner();

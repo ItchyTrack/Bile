@@ -4,10 +4,10 @@ use std::marker::PhantomData;
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::diff::DiffFulfillerAPI;
 use crate::dyn_system_params::{DynParam, RegisterDynParam};
 use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request};
-use crate::simple_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams};
+use super::api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams};
+use super::diff::DiffFulfillerAPI;
 
 // ============================ Storage Requests ============================
 

@@ -4,7 +4,7 @@ use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, DataType, DirtyState, Request, dyn_system_params::{DynParam, RegisterDynParam}};
-use crate::simple_api::{DynRequesterParams, DynStorageRequesterParams, RequesterAPI, RequesterParams, StorageRequesterAPI};
+use super::api::{DynRequesterParams, DynStorageRequesterParams, RequesterAPI, RequesterParams, StorageRequesterAPI};
 
 // ============================ Consuming API ============================
 

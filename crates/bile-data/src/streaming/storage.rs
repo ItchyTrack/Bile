@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{DataType, DirtyState, Request, cancel_range::{in_cancel_range, unheld_ranges}, dyn_system_params::{DynParam, RegisterDynParam}};
-use crate::streaming_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams, StreamId};
+use super::api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams, StreamId};
 
 // ============================ Streaming Storage ============================
 

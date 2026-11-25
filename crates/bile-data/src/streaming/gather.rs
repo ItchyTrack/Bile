@@ -4,13 +4,13 @@ use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{DataType, DirtyState, Request, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}};
-use crate::streaming_api::{DynFulfillerParams, FulfillerAPI, FulfillerParams, StreamId};
-use crate::streaming_producing::ProducingNodeAPI; // THIS IS VERY VERY VERY VERY VEYR BAD
-// THIS SHOULD NOT DEPEND ON ANYTHING IN streaming_producing. They are NOT the same.
-// This file and usages of this should stand apart from streaming_producing.
+use super::api::{DynFulfillerParams, FulfillerAPI, FulfillerParams, StreamId};
+use super::producing::ProducingNodeAPI; // THIS IS VERY VERY VERY VERY VEYR BAD
+// THIS SHOULD NOT DEPEND ON ANYTHING IN streaming::producing. They are NOT the same.
+// This file and usages of this should stand apart from streaming::producing.
 // This means it needs its own DataPasser and DataDirtier and ProducingNodeAPI.
-// This means Gather nodes do not need to impl streaming_producing::ProducingNodeAPI.
-// (They probably dont impl streaming_producing::ProducingNodeAPI as it would imple that they
+// This means Gather nodes do not need to impl streaming::producing::ProducingNodeAPI.
+// (They probably dont impl streaming::producing::ProducingNodeAPI as it would imple that they
 // could produce all the data needed for the params where gather is where each not cant
 // produce all the data needed for the params)
 // Total fail...

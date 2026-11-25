@@ -11,8 +11,8 @@ use bevy_trait_query::RegisterExt;
 use bile_data::{
 	BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request,
 	dyn_system_params::{DynParam, RegisterDynParam},
-	simple_api::{DynStorageFulfillerParams, DynStorageRequesterParams, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams},
-	simple_storage::{Fulfillers, Fulfilling, Requesters, StorageRequests},
+	simple::api::{DynStorageFulfillerParams, DynStorageRequesterParams, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams},
+	simple::storage::{Fulfillers, Fulfilling, Requesters, StorageRequests},
 };
 
 #[cfg(test)]

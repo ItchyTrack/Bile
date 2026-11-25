@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{DirtyState, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}, setup::{DataType, Request}};
-use crate::simple_api::{DynFulfillerParams, FulfillerParams};
+use super::api::{DynFulfillerParams, FulfillerParams};
 
 // ============================ Diff Fulfiller API ============================
 
