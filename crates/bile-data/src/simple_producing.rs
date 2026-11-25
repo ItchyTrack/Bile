@@ -10,9 +10,9 @@ use crate::simple_api::{DynFulfillerParams, DynStorageFulfillerParams, Fulfiller
 
 #[bevy_trait_query::queryable]
 pub trait ProducingNodeAPI<DT: DataType> {
-	fn cost(&self, request: &Request<DT>) -> Option<f32>; // None if the node can not fulfill the request
+	fn cost(&self, request: &Request<DT>) -> Option<f32>;
 	fn request(&mut self, request: Request<DT>);
-	fn cancel(&mut self, params: &DT::Params, latest: DirtyState, oldest: Option<u64>); // None if everything before latest
+	fn cancel(&mut self, params: &DT::Params, latest: DirtyState, oldest: Option<u64>);
 }
 
 // ============================ Fulfiller ============================
@@ -33,7 +33,7 @@ type Asked = (BTreeSet<DirtyState>, Option<DirtyState>);
 
 #[derive(Resource)]
 pub struct FulfillerBookkeeping<DT: DataType> {
-	entity: Entity, // The resource entity, the storage knows the fulfiller by it
+	this_entity: Entity,
 	asked: HashMap<DT::Params, (Asked, HashMap<Entity, Asked>)>, // Params -> What the storage asked for, Producing node -> What it was asked for
 }
 
@@ -110,7 +110,7 @@ impl<DT: DataType> DataPasser<'_, '_, DT> {
 		for (waiting, used) in [node, storage] {
 			if let Some(&wanted) = btree_drain::set_drain_range(waiting, ..=dirty_state).last() { *used = Some(wanted); }
 		}
-		self.storage.pass_data(&mut self.storage_params, fulfiller.entity, params, dirty_state, data);
+		self.storage.pass_data(&mut self.storage_params, fulfiller.this_entity, params, dirty_state, data);
 	}
 	// A diff applying node passes the data it did not apply the diffs to right away
 	pub fn pass_diffed_data(&mut self, source_entity: Entity, params: &DT::Params, data: DT::Data) {
@@ -149,9 +149,8 @@ impl BileRegisterSimpleProducer for App {
 	where DT: DataType, C: Component + ProducingNodeAPI<DT>,
 	{
 		if !self.world().contains_resource::<FulfillerBookkeeping<DT>>() {
-			self.insert_resource(FulfillerBookkeeping::<DT> { entity: Entity::PLACEHOLDER, asked: HashMap::default() });
-			let entity = self.world().resource_entity::<FulfillerBookkeeping<DT>>().expect("It was just inserted");
-			self.world_mut().resource_mut::<FulfillerBookkeeping<DT>>().entity = entity;
+			self.insert_resource(FulfillerBookkeeping::<DT> { this_entity: Entity::PLACEHOLDER, asked: HashMap::default() });
+			self.world_mut().resource_mut::<FulfillerBookkeeping<DT>>().this_entity = self.world().resource_entity::<FulfillerBookkeeping<DT>>().expect("It was just inserted");
 		}
 		self.register_component_as::<dyn ProducingNodeAPI<DT>, C>()
 			.register_component_as::<dyn FulfillerAPI<DT>, FulfillerBookkeeping<DT>>()

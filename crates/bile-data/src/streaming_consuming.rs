@@ -30,7 +30,7 @@ impl<DT: DataType> DynParam<RequesterParams<DT>> for RequesterSystemParams<DT> {
 
 #[derive(Resource)]
 pub struct RequesterBookkeeping<DT: DataType> {
-	entity: Entity, // The resource entity, the storage knows the requester by it
+	this_entity: Entity,
 	streams: HashMap<DT::Params, HashMap<StreamId, (DirtyState, HashSet<Entity>, bool)>>, // Params -> Stream -> The allowed tick it was requested with, the consuming nodes on it, and if anything was passed on it
 }
 
@@ -83,7 +83,7 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 impl<DT: DataType> Requester<'_, '_, DT> {
 	pub fn request(&mut self, request: Request<DT>, requester_node: Entity) -> StreamId {
 		let (params, allowed_tick) = (request.params.clone(), request.allowed_tick);
-		let stream_id = self.storage.request(&mut self.storage_params, self.requester.entity, request);
+		let stream_id = self.storage.request(&mut self.storage_params, self.requester.this_entity, request);
 		let (_, nodes, _) = self.requester.streams.entry(params).or_default().entry(stream_id).or_insert_with(|| (allowed_tick, HashSet::new(), false));
 		nodes.insert(requester_node);
 		stream_id
@@ -101,7 +101,7 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 		if streams.is_empty() { requester.streams.remove(params); }
 		// Only what no other node still holds
 		for (latest, oldest) in unheld_ranges(held, latest, oldest) {
-			if cancelled.iter().any(|&allowed_tick| in_cancel_range(allowed_tick, latest, oldest)) { self.storage.cancel(&mut self.storage_params, requester.entity, params, latest, oldest); }
+			if cancelled.iter().any(|&allowed_tick| in_cancel_range(allowed_tick, latest, oldest)) { self.storage.cancel(&mut self.storage_params, requester.this_entity, params, latest, oldest); }
 		}
 	}
 }
@@ -116,9 +116,9 @@ impl BileRegisterStreamingConsumer for App {
 	where DT: DataType, C: Component + ConsumingNodeAPI<DT>,
 	{
 		if !self.world().contains_resource::<RequesterBookkeeping<DT>>() {
-			self.insert_resource(RequesterBookkeeping::<DT> { entity: Entity::PLACEHOLDER, streams: HashMap::default() });
+			self.insert_resource(RequesterBookkeeping::<DT> { this_entity: Entity::PLACEHOLDER, streams: HashMap::default() });
 			let entity = self.world().resource_entity::<RequesterBookkeeping<DT>>().expect("It was just inserted");
-			self.world_mut().resource_mut::<RequesterBookkeeping<DT>>().entity = entity;
+			self.world_mut().resource_mut::<RequesterBookkeeping<DT>>().this_entity = entity;
 		}
 		self.register_component_as::<dyn ConsumingNodeAPI<DT>, C>()
 			.register_component_as::<dyn RequesterAPI<DT>, RequesterBookkeeping<DT>>()
