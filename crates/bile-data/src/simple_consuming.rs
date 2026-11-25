@@ -3,7 +3,7 @@ use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, marker::PhantomDa
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{btree_drain, cancel_range::{cancel_range, is_cancelled, unheld_ranges}, DataType, DirtyState, Request, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, DataType, DirtyState, Request, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::simple_api::{DynRequesterParams, DynStorageRequesterParams, RequesterAPI, RequesterParams, StorageRequesterAPI};
 
 // ============================ Consuming API ============================
@@ -24,10 +24,9 @@ impl<DT: DataType> DynParam<RequesterParams<DT>> for RequesterSystemParams<DT> {
 
 #[derive(Resource)]
 pub struct RequesterBookkeeping<DT: DataType> {
-	entity: Entity, // The resource entity, the storage knows the requester by it
+	self_entity: Entity,
 	waiting: HashMap<DT::Params, (HashMap<Entity, BTreeSet<DirtyState>>, BTreeMap<DirtyState, HashSet<Entity>>)>,
 	usages: HashMap<DT::Params, HashMap<Entity, DirtyState>>, // Params -> Consuming node -> Wanted dirty state
-	at_storage: HashMap<DT::Params, (BTreeSet<DirtyState>, Option<DirtyState>)>, // Params -> What the storage has for it: the dirty states it waits for, and the wanted dirty state it uses
 }
 
 impl<DT: DataType> RequesterBookkeeping<DT> {
@@ -59,8 +58,6 @@ impl<DT: DataType> RequesterAPI<DT> for RequesterBookkeeping<DT> {
 		dirty_state: DirtyState,
 		data: &DT::Data,
 	) {
-		// The storage keeps the freshest request the data satisfies as what is used
-		if let Some((waiting, usage)) = self.at_storage.get_mut(params) && let Some(&wanted) = btree_drain::set_drain_range(waiting, ..=dirty_state).last() { *usage = Some(wanted); }
 		let Some(waiting) = self.waiting.get_mut(params) else { return; };
 		let mut consuming_nodes = requester_params.get::<RequesterSystemParams<DT>>();
 		// A node gets the data once, for the freshest of its requests it satisfies
@@ -106,10 +103,7 @@ pub struct Requester<'w, 's, DT: DataType> {
 
 impl<DT: DataType> Requester<'_, '_, DT> {
 	pub fn request(&mut self, requester_node: Entity, request: &Request<DT>) -> Option<(DT::Data, DirtyState)> {
-		let served = self.storage.request(&mut self.storage_params, self.requester.entity, request);
-		let (waiting, usage) = self.requester.at_storage.entry(request.params.clone()).or_default();
-		if served.is_some() { *usage = Some(request.allowed_tick); } else { waiting.insert(request.allowed_tick); }
-		if let Some((data, dirty_state)) = served {
+		if let Some((data, dirty_state)) = self.storage.request(&mut self.storage_params, self.requester.self_entity, request) {
 			// The storage may still pass the data for the waits it satisfies, the node has it already
 			let satisfied = self.requester.remove_waits(&request.params, requester_node, ..=dirty_state);
 			let wanted = satisfied.last().map_or(request.allowed_tick, |&wanted| wanted.max(request.allowed_tick));
@@ -124,19 +118,18 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 	pub fn cancel(&mut self, requester_node: Entity, params: &DT::Params, latest: DirtyState, oldest: Option<u64>) {
 		let requester = &mut *self.requester;
 		if let Some(usages) = requester.usages.get_mut(params) {
-			if usages.get(&requester_node).is_some_and(|&wanted| is_cancelled(wanted, latest, oldest)) { usages.remove(&requester_node); }
+			if usages.get(&requester_node).is_some_and(|&wanted| in_cancel_range(wanted, latest, oldest)) { usages.remove(&requester_node); }
 			if usages.is_empty() { requester.usages.remove(params); }
 		}
 		requester.remove_waits(params, requester_node, cancel_range(latest, oldest));
 		let held = requester.held(params);
 		if held.is_empty() {
-			if requester.at_storage.remove(params).is_some() { self.storage.cancel(&mut self.storage_params, requester.entity, params, DirtyState::UpToDate, None); }
+			self.storage.cancel(&mut self.storage_params, requester.self_entity, params, DirtyState::UpToDate, None);
 			return;
 		}
-		let Some((waiting, usage)) = requester.at_storage.get_mut(params) else { return; };
 		// Only what no other node still waits for or uses, and not what it uses at the storage
-		for (latest, oldest) in unheld_ranges(held.into_iter().chain(*usage), latest, oldest) {
-			if !btree_drain::set_drain_range(waiting, cancel_range(latest, oldest)).is_empty() { self.storage.cancel(&mut self.storage_params, requester.entity, params, latest, oldest); }
+		for (latest, oldest) in unheld_ranges(held.into_iter(), latest, oldest) {
+			self.storage.cancel(&mut self.storage_params, requester.self_entity, params, latest, oldest);
 		}
 	}
 }
@@ -151,9 +144,8 @@ impl BileRegisterSimpleConsumer for App {
 	where DT: DataType, C: Component + ConsumingNodeAPI<DT>,
 	{
 		if !self.world().contains_resource::<RequesterBookkeeping<DT>>() {
-			self.insert_resource(RequesterBookkeeping::<DT> { entity: Entity::PLACEHOLDER, waiting: HashMap::default(), usages: HashMap::default(), at_storage: HashMap::default() });
-			let entity = self.world().resource_entity::<RequesterBookkeeping<DT>>().expect("It was just inserted");
-			self.world_mut().resource_mut::<RequesterBookkeeping<DT>>().entity = entity;
+			self.insert_resource(RequesterBookkeeping::<DT> { self_entity: Entity::PLACEHOLDER, waiting: HashMap::default(), usages: HashMap::default() });
+			self.world_mut().resource_mut::<RequesterBookkeeping<DT>>().self_entity = self.world().resource_entity::<RequesterBookkeeping<DT>>().expect("It was just inserted");
 		}
 		self.register_component_as::<dyn ConsumingNodeAPI<DT>, C>()
 			.register_component_as::<dyn RequesterAPI<DT>, RequesterBookkeeping<DT>>()

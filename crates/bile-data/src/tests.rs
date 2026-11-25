@@ -5,7 +5,7 @@ use crate::{diff::{BileRegisterDiff, DiffApplyingNode}, simple_api::{DynFulfille
 use crate::simple_consuming::{BileRegisterSimpleConsumer, ConsumingNodeAPI, Requester};
 use crate::simple_producing::{BileRegisterSimpleProducer, DataDirtier, DataPasser, ProducingNodeAPI};
 use crate::simple_storage::BileAddSimpleStorage;
-use crate::cancel_range::{is_cancelled, unheld_ranges};
+use crate::cancel_range::{in_cancel_range, unheld_ranges};
 
 const UP_TO_DATE: DirtyState = DirtyState::UpToDate;
 const fn dirty(tick: u64) -> DirtyState { DirtyState::Dirty { tick } }
@@ -29,12 +29,12 @@ fn unheld_ranges_skip_the_held_states() {
 
 #[test]
 fn cancel_covers_its_range() {
-	assert!(is_cancelled(UP_TO_DATE, UP_TO_DATE, Some(6)));
-	assert!(is_cancelled(dirty(6), UP_TO_DATE, Some(6)));
-	assert!(!is_cancelled(dirty(5), UP_TO_DATE, Some(6)));
-	assert!(is_cancelled(dirty(0), dirty(4), None));
-	assert!(!is_cancelled(dirty(5), dirty(4), None));
-	assert!(!is_cancelled(UP_TO_DATE, dirty(u64::MAX), None));
+	assert!(in_cancel_range(UP_TO_DATE, UP_TO_DATE, Some(6)));
+	assert!(in_cancel_range(dirty(6), UP_TO_DATE, Some(6)));
+	assert!(!in_cancel_range(dirty(5), UP_TO_DATE, Some(6)));
+	assert!(in_cancel_range(dirty(0), dirty(4), None));
+	assert!(!in_cancel_range(dirty(5), dirty(4), None));
+	assert!(!in_cancel_range(UP_TO_DATE, dirty(u64::MAX), None));
 }
 
 // ============================ Nodes ============================

@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, StateTick, cancel_range::is_cancelled, dyn_system_params::{DynParam, RegisterDynParam}, gather::GatherFulfiller};
+use crate::{DataType, DirtyState, Request, StateTick, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}, gather::GatherFulfiller};
 use crate::streaming_api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI, StreamId};
 
 // ============================ Producing API ============================
@@ -79,7 +79,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 		let Some(streams) = self.asked.get_mut(params) else { return; };
 		let mut nodes = HashSet::new();
 		streams.retain(|_, &mut (allowed_tick, entity, _)| {
-			if !is_cancelled(allowed_tick, latest, oldest) { return true; }
+			if !in_cancel_range(allowed_tick, latest, oldest) { return true; }
 			nodes.insert(entity);
 			false
 		});

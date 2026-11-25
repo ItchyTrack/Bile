@@ -6,7 +6,7 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::diff::DiffFulfillerAPI;
 use crate::dyn_system_params::{DynParam, RegisterDynParam};
-use crate::{btree_drain, cancel_range::{cancel_range, is_cancelled, unheld_ranges}, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request};
+use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request};
 use crate::simple_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams};
 
 // ============================ Storage Requests ============================
@@ -153,7 +153,7 @@ impl<DT: DataType> StorageRequests<DT> {
 		let Some(requests) = self.requests.get_mut(params) else { return Vec::new(); };
 		let Some((waiting, usage)) = requests.requesters.get_mut(&requester) else { return Vec::new(); };
 		let waited = !btree_drain::set_drain_range(waiting, cancel_range(latest, oldest)).is_empty();
-		let used = usage.is_some_and(|usage| is_cancelled(usage, latest, oldest));
+		let used = usage.is_some_and(|usage| in_cancel_range(usage, latest, oldest));
 		if used { *usage = None; }
 		if !waited && !used { return Vec::new(); }
 		if waiting.is_empty() && usage.is_none() { requests.requesters.remove(&requester); }
@@ -164,7 +164,7 @@ impl<DT: DataType> StorageRequests<DT> {
 		// Only what was passed on and nobody waits for anymore. A request served from the storage never reached the
 		// fulfillers, so they keep their last state, or they would drop data that is still used.
 		let Requests { requesters, fulfillers, diffing, dirties, source, .. } = requests;
-		let unwaited = |dirty_state: &DirtyState| is_cancelled(*dirty_state, latest, oldest) && !requesters.values().any(|(waiting, _)| waiting.contains(dirty_state));
+		let unwaited = |dirty_state: &DirtyState| in_cancel_range(*dirty_state, latest, oldest) && !requesters.values().any(|(waiting, _)| waiting.contains(dirty_state));
 		let mut cancels = Vec::new();
 		if fulfillers.values().any(|(passed_on, used)| used.is_some() || !passed_on.iter().all(unwaited)) {
 			fulfillers.retain(|&fulfiller, (passed_on, used)| {
@@ -172,9 +172,9 @@ impl<DT: DataType> StorageRequests<DT> {
 				if *source == Some(fulfiller) && used.is_none() && cancelled.len() == passed_on.len() { cancelled.clear(); }
 				let held = passed_on.iter().copied().filter(|dirty_state| !cancelled.contains(dirty_state)).chain(*used);
 				let mut ranges = unheld_ranges(held, latest, oldest);
-				ranges.retain(|&(latest, oldest)| cancelled.iter().any(|&dirty_state| is_cancelled(dirty_state, latest, oldest)));
+				ranges.retain(|&(latest, oldest)| cancelled.iter().any(|&dirty_state| in_cancel_range(dirty_state, latest, oldest)));
 				// What can not be cancelled without what it keeps stays in flight
-				passed_on.retain(|&dirty_state| !ranges.iter().any(|&(latest, oldest)| is_cancelled(dirty_state, latest, oldest)));
+				passed_on.retain(|&dirty_state| !ranges.iter().any(|&(latest, oldest)| in_cancel_range(dirty_state, latest, oldest)));
 				cancels.extend(ranges.into_iter().map(|(latest, oldest)| (fulfiller, latest, oldest)));
 				!passed_on.is_empty() || used.is_some()
 			});

@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, cancel_range::is_cancelled, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{DataType, DirtyState, Request, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::streaming_api::{DynFulfillerParams, FulfillerAPI, FulfillerParams, StreamId};
 use crate::streaming_producing::ProducingNodeAPI;
 
@@ -71,7 +71,7 @@ impl<DT: DataType> FulfillerAPI<DT> for GatherFulfiller<DT> {
 		let Some(streams) = self.streams.get_mut(params) else { return; };
 		let mut nodes = HashSet::new();
 		streams.retain(|_, (allowed_tick, stream_nodes)| {
-			if !is_cancelled(*allowed_tick, latest, oldest) { return true; }
+			if !in_cancel_range(*allowed_tick, latest, oldest) { return true; }
 			nodes.extend(stream_nodes.keys().copied());
 			false
 		});

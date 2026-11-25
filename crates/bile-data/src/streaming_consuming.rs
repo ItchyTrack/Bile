@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, cancel_range::{is_cancelled, unheld_ranges}, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{DataType, DirtyState, Request, cancel_range::{in_cancel_range, unheld_ranges}, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::streaming_api::{DynRequesterParams, DynStorageRequesterParams, RequesterAPI, RequesterParams, StorageRequesterAPI, StreamId};
 
 // ============================ Consuming API ============================
@@ -93,7 +93,7 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 		let Some(streams) = requester.streams.get_mut(params) else { return; };
 		let mut cancelled = Vec::new();
 		streams.retain(|_, (allowed_tick, nodes, _)| {
-			if !is_cancelled(*allowed_tick, latest, oldest) || !nodes.remove(&requester_node) || !nodes.is_empty() { return true; }
+			if !in_cancel_range(*allowed_tick, latest, oldest) || !nodes.remove(&requester_node) || !nodes.is_empty() { return true; }
 			cancelled.push(*allowed_tick);
 			false
 		});
@@ -101,7 +101,7 @@ impl<DT: DataType> Requester<'_, '_, DT> {
 		if streams.is_empty() { requester.streams.remove(params); }
 		// Only what no other node still holds
 		for (latest, oldest) in unheld_ranges(held, latest, oldest) {
-			if cancelled.iter().any(|&allowed_tick| is_cancelled(allowed_tick, latest, oldest)) { self.storage.cancel(&mut self.storage_params, requester.entity, params, latest, oldest); }
+			if cancelled.iter().any(|&allowed_tick| in_cancel_range(allowed_tick, latest, oldest)) { self.storage.cancel(&mut self.storage_params, requester.entity, params, latest, oldest); }
 		}
 	}
 }

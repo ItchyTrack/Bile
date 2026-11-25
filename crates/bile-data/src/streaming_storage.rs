@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, marker::PhantomData};
 use bevy::prelude::*;
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{DataType, DirtyState, Request, cancel_range::{is_cancelled, unheld_ranges}, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{DataType, DirtyState, Request, cancel_range::{in_cancel_range, unheld_ranges}, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::streaming_api::{DynFulfillerParams, DynRequesterParams, DynStorageFulfillerParams, DynStorageRequesterParams, FulfillerAPI, RequesterAPI, StorageFulfillerAPI, StorageFulfillerParams, StorageRequesterAPI, StorageRequesterParams, StreamId};
 
 // ============================ Streaming Storage ============================
@@ -68,7 +68,7 @@ impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 		let Some(streams) = self.streams.get_mut(params) else { return; };
 		let mut cancelled = Vec::new();
 		streams.retain(|_, (allowed_tick, requesters, _)| {
-			if !is_cancelled(*allowed_tick, latest, oldest) || !requesters.remove(&requester) || !requesters.is_empty() { return true; }
+			if !in_cancel_range(*allowed_tick, latest, oldest) || !requesters.remove(&requester) || !requesters.is_empty() { return true; }
 			cancelled.push(*allowed_tick);
 			false
 		});
@@ -77,7 +77,7 @@ impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 		// Only what no other stream still holds, the fulfillers are not told which stream it was
 		let (mut fulfillers, mut fulfiller_params) = storage_params.get::<StorageRequesterSystemParams<DT>>();
 		for (latest, oldest) in unheld_ranges(held, latest, oldest) {
-			if !cancelled.iter().any(|&allowed_tick| is_cancelled(allowed_tick, latest, oldest)) { continue; }
+			if !cancelled.iter().any(|&allowed_tick| in_cancel_range(allowed_tick, latest, oldest)) { continue; }
 			for (_, mut fulfiller) in &mut fulfillers {
 				fulfiller.cancel(&mut fulfiller_params, params, latest, oldest);
 			}

@@ -7,68 +7,6 @@ use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(pub u64);
 
-// ============================ Fulfiller ============================
-
-pub struct StorageFulfillerParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for StorageFulfillerParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynStorageFulfillerParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, StorageFulfillerParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait StorageFulfillerAPI<DT: DataType> {
-	fn push(&mut self,
-		storage_params: &mut DynStorageFulfillerParams<DT>,
-		stream_id: StreamId,
-		params: &DT::Params,
-		dirty_state: DirtyState,
-		data: DT::Data,
-	);
-	fn finish(&mut self,
-		storage_params: &mut DynStorageFulfillerParams<DT>,
-		stream_id: StreamId,
-		params: &DT::Params,
-	);
-	fn dirty_data(&mut self,
-		storage_params: &mut DynStorageFulfillerParams<DT>,
-		params: &DT::Params,
-		last_clean_tick: u64,
-		diff: Option<&DT::Diff>,
-	);
-}
-
-pub struct FulfillerParams<DT: DataType>(PhantomData<DT>);
-
-impl<DT: DataType> Default for FulfillerParams<DT> {
-	fn default() -> Self { Self(Default::default()) }
-}
-
-pub type DynFulfillerParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, FulfillerParams<DT>>;
-
-#[bevy_trait_query::queryable]
-pub trait FulfillerAPI<DT: DataType> {
-	fn cost(
-		&self,
-		fulfiller_params: &mut DynFulfillerParams<DT>,
-		request: &Request<DT>,
-	) -> Option<f32>; // None if the node can not fulfill the request
-	fn request(
-		&mut self,
-		fulfiller_params: &mut DynFulfillerParams<DT>,
-		stream_id: StreamId,
-		request: Request<DT>,
-	);
-	fn cancel(
-		&mut self,
-		fulfiller_params: &mut DynFulfillerParams<DT>,
-		params: &DT::Params,
-		latest: DirtyState,
-		oldest: Option<u64>, // None if everything before latest
-	);
-}
-
 // ============================ Requester ============================
 
 pub struct StorageRequesterParams<DT: DataType>(PhantomData<DT>);
@@ -124,5 +62,67 @@ pub trait RequesterAPI<DT: DataType> {
 		params: &DT::Params,
 		last_clean_tick: u64,
 		diff: Option<&DT::Diff>,
+	);
+}
+
+// ============================ Fulfiller ============================
+
+pub struct StorageFulfillerParams<DT: DataType>(PhantomData<DT>);
+
+impl<DT: DataType> Default for StorageFulfillerParams<DT> {
+	fn default() -> Self { Self(Default::default()) }
+}
+
+pub type DynStorageFulfillerParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, StorageFulfillerParams<DT>>;
+
+#[bevy_trait_query::queryable]
+pub trait StorageFulfillerAPI<DT: DataType> {
+	fn push(&mut self,
+		storage_params: &mut DynStorageFulfillerParams<DT>,
+		stream_id: StreamId,
+		params: &DT::Params, // Why pass params? stream_id should have all the infomation needed.
+		dirty_state: DirtyState,
+		data: DT::Data,
+	);
+	fn finish(&mut self,
+		storage_params: &mut DynStorageFulfillerParams<DT>,
+		stream_id: StreamId,
+		params: &DT::Params,
+	);
+	fn dirty_data(&mut self,
+		storage_params: &mut DynStorageFulfillerParams<DT>,
+		params: &DT::Params,
+		last_clean_tick: u64,
+		diff: Option<&DT::Diff>,
+	);
+}
+
+pub struct FulfillerParams<DT: DataType>(PhantomData<DT>);
+
+impl<DT: DataType> Default for FulfillerParams<DT> {
+	fn default() -> Self { Self(Default::default()) }
+}
+
+pub type DynFulfillerParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, FulfillerParams<DT>>;
+
+#[bevy_trait_query::queryable]
+pub trait FulfillerAPI<DT: DataType> {
+	fn cost(
+		&self,
+		fulfiller_params: &mut DynFulfillerParams<DT>,
+		request: &Request<DT>,
+	) -> Option<f32>; // None if the node can not fulfill the request
+	fn request(
+		&mut self,
+		fulfiller_params: &mut DynFulfillerParams<DT>,
+		stream_id: StreamId,
+		request: Request<DT>,
+	);
+	fn cancel(
+		&mut self,
+		fulfiller_params: &mut DynFulfillerParams<DT>,
+		params: &DT::Params,
+		latest: DirtyState,
+		oldest: Option<u64>, // None if everything before latest
 	);
 }

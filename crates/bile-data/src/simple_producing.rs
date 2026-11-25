@@ -3,7 +3,7 @@ use std::{collections::{BTreeSet, HashMap}, marker::PhantomData};
 use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
-use crate::{btree_drain, cancel_range::{cancel_range, is_cancelled, unheld_ranges}, DataType, DirtyState, Request, StateTick, diff::DiffFulfiller, dyn_system_params::{DynParam, RegisterDynParam}};
+use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, DataType, DirtyState, Request, StateTick, diff::DiffFulfiller, dyn_system_params::{DynParam, RegisterDynParam}};
 use crate::simple_api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI};
 
 // ============================ Producing API ============================
@@ -68,7 +68,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 	) {
 		let Some(((waiting, used), nodes)) = self.asked.get_mut(params) else { return; };
 		btree_drain::set_drain_range(waiting, cancel_range(latest, oldest));
-		if used.is_some_and(|used| is_cancelled(used, latest, oldest)) { *used = None; }
+		if used.is_some_and(|used| in_cancel_range(used, latest, oldest)) { *used = None; }
 		let mut producing_nodes = fulfiller_params.get::<FulfillerSystemParams<DT>>();
 		// The storage keeps one dirty state for the data of every node. So a node keeps what its data satisfied until
 		// the storage asks for nothing here anymore, then every node is told to stop.

@@ -1,7 +1,7 @@
 use std::{collections::{BTreeSet, HashMap}, sync::Arc};
 
 use bevy::{prelude::*, tasks::{block_on, AsyncComputeTaskPool, Task}};
-use bile_data::{DataType, DirtyState, Request, btree_drain, cancel_range::is_cancelled, diff::{self, BileRegisterDiff}, simple_producing::{self, BileRegisterSimpleProducer}, simple_storage::BileAddSimpleStorage};
+use bile_data::{DataType, DirtyState, Request, btree_drain, cancel_range::in_cancel_range, diff::{self, BileRegisterDiff}, simple_producing::{self, BileRegisterSimpleProducer}, simple_storage::BileAddSimpleStorage};
 use bile_tiles::TileKey;
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
@@ -137,8 +137,8 @@ impl simple_producing::ProducingNodeAPI<Heightmap> for HeightmapSource {
 
 	fn cancel(&mut self, tile_key: &TileKey, latest: DirtyState, oldest: Option<u64>) {
 		let Some((waiting, used)) = self.live.get_mut(tile_key) else { return; };
-		waiting.retain(|&dirty_state| !is_cancelled(dirty_state, latest, oldest));
-		if used.is_some_and(|used| is_cancelled(used, latest, oldest)) { *used = None; }
+		waiting.retain(|&dirty_state| !in_cancel_range(dirty_state, latest, oldest));
+		if used.is_some_and(|used| in_cancel_range(used, latest, oldest)) { *used = None; }
 		if waiting.is_empty() && used.is_none() {
 			self.live.remove(tile_key);
 			self.tasks.retain(|(task_tile_key, ..)| task_tile_key != tile_key);
