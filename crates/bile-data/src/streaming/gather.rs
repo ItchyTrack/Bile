@@ -15,6 +15,10 @@ use super::producing::ProducingNodeAPI; // THIS IS VERY VERY VERY VERY VEYR BAD
 // produce all the data needed for the params)
 // Total fail...
 
+// The fix is simple. Stop using streaming::producing.
+// You dont need to edit streaming::producing (unless something was added just to support gather).
+// Redo this as gather producing (not called that) its just a Fulfiller API impl like streaming::producing.
+
 // ============================ Gather Fulfiller ============================
 
 pub struct GatherSystemParams<DT: DataType>(PhantomData<DT>);
