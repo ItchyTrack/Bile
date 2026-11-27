@@ -6,6 +6,13 @@ use bevy_trait_query::{One, RegisterExt};
 use crate::{DirtyState, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}, setup::{DataType, Request}};
 use super::api::{DynFulfillerParams, FulfillerParams};
 
+// ARG! I think you did the same thing here that you did with gather.
+// I assume that to "passed later" you want the user to use the simple producing API.
+// The WHOLE point of bile is to decouple the code.
+// By doing trying to 'dedup' code you really just couple it and make it hard to change and understand.
+// I mean why should a diff applier use something like simple::producing::DataPasser. Who even says that the storage using these diffs supports simple::producing!
+// I want the same thing as I asked in gather. Impl a pass data just like simple::producing but ONLY for diffs. I want duplicate code. I dont want shared code.
+
 // ============================ Diff Fulfiller API ============================
 
 // The diffs are the first dirties the stored data lacks, whole ticks up to the first dirty without a diff.
@@ -40,7 +47,7 @@ pub trait DiffFulfillerAPI<DT: DataType> {
 #[bevy_trait_query::queryable]
 pub trait DiffApplyingNode<DT: DataType> {
 	fn diff_cost(&self, request: &Request<DT>, diffs: &[DT::Diff]) -> Option<f32>; // None if the node can not apply the diffs
-	// Edit the data and return true, or return false and pass the new data later (async work).
+	// Edit the data and return true, or return false and pass the new data later.
 	fn apply(&mut self, params: &DT::Params, data: &mut DT::Data, diffs: Vec<DT::Diff>) -> bool;
 }
 
