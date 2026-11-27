@@ -1,6 +1,11 @@
 use std::marker::PhantomData;
 
+use bevy::prelude::*;
+
 use crate::{DataType, DirtyState, Request, dyn_system_params::DynSystemParams};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StreamId(pub u64);
 
 // ============================ Requester ============================
 
@@ -17,11 +22,13 @@ pub trait StorageRequesterAPI<DT: DataType> {
 	fn request(
 		&mut self,
 		storage_params: &mut DynSystemParams<StorageRequesterParams<DT>>,
-		request: &Request<DT>,
-	) -> Option<(DT::Data, DirtyState)>;
+		requester: Entity,
+		request: Request<DT>,
+	) -> StreamId;
 	fn cancel(
 		&mut self,
 		storage_params: &mut DynSystemParams<StorageRequesterParams<DT>>,
+		requester: Entity,
 		params: &DT::Params,
 		latest: DirtyState,
 		oldest: Option<u64>, // None if everything before latest
@@ -38,15 +45,19 @@ pub type DynRequesterParams<'w, 's, DT: DataType> = DynSystemParams<'w, 's, Requ
 
 #[bevy_trait_query::queryable]
 pub trait RequesterAPI<DT: DataType> {
-	fn pass_data(
-		&mut self,
+	fn push(&mut self,
 		requester_params: &mut DynRequesterParams<DT>,
+		stream_id: StreamId,
 		params: &DT::Params,
 		dirty_state: DirtyState,
-		data: &DT::Data,
+		data: DT::Data,
 	);
-	fn dirty_data(
-		&mut self,
+	fn finish(&mut self,
+		requester_params: &mut DynRequesterParams<DT>,
+		stream_id: StreamId,
+		params: &DT::Params,
+	);
+	fn dirty_data(&mut self,
 		requester_params: &mut DynRequesterParams<DT>,
 		params: &DT::Params,
 		last_clean_tick: u64,
@@ -66,15 +77,17 @@ pub type DynStorageFulfillerParams<'w, 's, DT: DataType> = DynSystemParams<'w, '
 
 #[bevy_trait_query::queryable]
 pub trait StorageFulfillerAPI<DT: DataType> {
-	fn pass_data(
-		&mut self,
+	fn push(&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
-		params: &DT::Params,
+		stream_id: StreamId,
 		dirty_state: DirtyState,
 		data: DT::Data,
 	);
-	fn dirty_data(
-		&mut self,
+	fn finish(&mut self,
+		storage_params: &mut DynStorageFulfillerParams<DT>,
+		stream_id: StreamId,
+	);
+	fn dirty_data(&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
 		params: &DT::Params,
 		last_clean_tick: u64,
@@ -100,6 +113,7 @@ pub trait FulfillerAPI<DT: DataType> {
 	fn request(
 		&mut self,
 		fulfiller_params: &mut DynFulfillerParams<DT>,
+		stream_id: StreamId,
 		request: Request<DT>,
 	);
 	fn cancel(

@@ -8,7 +8,7 @@ use bevy::{
 	tasks::{block_on, AsyncComputeTaskPool, Task},
 };
 use bile_components::{AddComponentData, ComponentData};
-use bile_data::{DataType, DirtyState, Request, simple::{self, BileRegisterSimple}};
+use bile_data::{BileDataSchedule, BileDataSystemSet, DataType, DirtyState, Request, simple::{self, consuming::BileRegisterSimpleConsumer, producing::BileRegisterSimpleProducer}};
 use bile_tiles::{BileTilesSchedule, BileTilesSystemSet, DesireForClass, TileKey};
 
 use crate::{heightmap::{Heightmap, Heights, Raised}, terrain::TerrainClass};
@@ -42,12 +42,12 @@ impl ComponentData for GrassMesh {
 struct GrassMeshNode {
 	requested: Vec<TileKey>,
 	dropped: Vec<TileKey>,
-	dirtied: Vec<TileKey>,
+	dirtied: Vec<(TileKey, u64)>,
 	ready: Vec<(TileKey, Arc<Heights>)>,
 	building: Vec<(TileKey, Task<Option<Mesh>>)>,
 }
 
-impl simple::DataProducingNode<GrassMesh> for GrassMeshNode {
+impl simple::producing::ProducingNodeAPI<GrassMesh> for GrassMeshNode {
 	fn cost(&self, _request: &Request<GrassMesh>) -> Option<f32> { Some(1.0) }
 
 	fn request(&mut self, request: Request<GrassMesh>) {
@@ -55,7 +55,9 @@ impl simple::DataProducingNode<GrassMesh> for GrassMeshNode {
 		self.requested.push(request.params);
 	}
 
-	fn drop(&mut self, tile_key: &TileKey) {
+	fn cancel(&mut self, tile_key: &TileKey, latest: DirtyState, oldest: Option<u64>) {
+		// It only makes up to date meshes, so it stops when everything is cancelled
+		if latest != DirtyState::UpToDate || oldest.is_some() { return; }
 		self.requested.retain(|key| key != tile_key);
 		self.ready.retain(|(key, _)| key != tile_key);
 		self.building.retain(|(key, _)| key != tile_key);
@@ -63,38 +65,38 @@ impl simple::DataProducingNode<GrassMesh> for GrassMeshNode {
 	}
 }
 
-impl simple::DataConsumingNode<Heightmap> for GrassMeshNode {
-	fn pass_data(&mut self, tile_key: &TileKey, _tick: u64, heights: Arc<Heights>) {
-		self.ready.push((*tile_key, heights));
+impl simple::consuming::ConsumingNodeAPI<Heightmap> for GrassMeshNode {
+	fn pass_data(&mut self, tile_key: &TileKey, _dirty_state: DirtyState, heights: &Arc<Heights>) {
+		self.ready.push((*tile_key, heights.clone()));
 	}
 
-	fn dirty_data(&mut self, tile_key: &TileKey, _last_clean_tick: u64, _diff: Option<&Raised>) {
+	fn dirty_data(&mut self, tile_key: &TileKey, last_clean_tick: u64, _diff: Option<&Raised>) {
 		self.ready.retain(|(key, _)| key != tile_key);
 		self.building.retain(|(key, _)| key != tile_key);
 		self.requested.push(*tile_key);
-		self.dirtied.push(*tile_key);
+		self.dirtied.push((*tile_key, last_clean_tick));
 	}
 }
 
-fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: simple::DataDirtier<GrassMesh>) {
-	for tile_key in node.into_inner().dirtied.drain(..) {
-		dirtier.mark_dirty(&tile_key, None);
+fn dirty_grass_meshes(node: Single<&mut GrassMeshNode>, mut dirtier: simple::producing::DataDirtier<GrassMesh>) {
+	for (tile_key, last_clean_tick) in node.into_inner().dirtied.drain(..) {
+		dirtier.mark_dirty(&tile_key, last_clean_tick, None);
 	}
 }
 
 fn update_grass_meshes(
 	node: Single<(Entity, &mut GrassMeshNode)>,
-	mut heightmaps: simple::DataRequester<Heightmap>,
-	mut passer: simple::DataPasser<GrassMesh>,
+	mut heightmaps: simple::consuming::Requester<Heightmap>,
+	mut passer: simple::producing::DataPasser<GrassMesh>,
 	mut meshes: ResMut<Assets<Mesh>>,
 ) {
 	let (entity, mut node) = node.into_inner();
 	let node = &mut *node;
 	for tile_key in node.dropped.drain(..) {
-		heightmaps.cancel(&tile_key, entity);
+		heightmaps.cancel(entity, &tile_key, DirtyState::UpToDate, None);
 	}
 	for tile_key in std::mem::take(&mut node.requested) {
-		if let Some(heights) = heightmaps.request(Request::new(tile_key, DirtyState::UpToDate), entity) {
+		if let Some((heights, _)) = heightmaps.request(entity, &Request::new(tile_key, DirtyState::UpToDate)) {
 			node.ready.push((tile_key, heights));
 		}
 	}
@@ -204,7 +206,7 @@ impl Plugin for GrassPlugin {
 			.register_producer_simple::<GrassMesh, GrassMeshNode>()
 			.register_consumer_simple::<Heightmap, GrassMeshNode>()
 			.add_systems(Startup, setup_grass_material)
-			.add_systems(Update, (dirty_grass_meshes, update_grass_meshes))
+			.add_systems(BileDataSchedule, (dirty_grass_meshes.in_set(BileDataSystemSet::PropagateDirty), update_grass_meshes.in_set(BileDataSystemSet::Request)))
 			.add_systems(PostUpdate, spawn_grass_blades)
 			.add_observer(despawn_grass_blades)
 			.add_systems(BileTilesSchedule, decide_grass_components.in_set(BileTilesSystemSet::UpdateWantedComponents));

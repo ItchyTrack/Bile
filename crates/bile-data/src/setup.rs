@@ -13,7 +13,11 @@ impl StateTick {
 	}
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+fn update_state_tick(mut state_tick: ResMut<StateTick>) {
+	state_tick.current_tick += 1;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum DirtyState {
 	UpToDate,
 	Dirty{tick: u64}
@@ -83,8 +87,11 @@ pub struct BileDataSchedule;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BileDataSystemSet {
-	DropData,
+	PropagateDirty,
+	Cancel,
+	Request,
 	PassData,
+	Store, // Storages move the data to where it is kept
 	UpdateStateTick,
 }
 
@@ -100,12 +107,16 @@ impl Plugin for BileDataDefaultPlugin {
 		app.configure_sets(
 			BileDataSchedule,
 			(
-				BileDataSystemSet::DropData,
+				BileDataSystemSet::PropagateDirty,
+				BileDataSystemSet::Cancel,
+				BileDataSystemSet::Request,
 				BileDataSystemSet::PassData,
+				BileDataSystemSet::Store,
 				BileDataSystemSet::UpdateStateTick,
 			).chain(),
 		);
 
 		app.init_resource::<StateTick>();
+		app.add_systems(BileDataSchedule, update_state_tick.in_set(BileDataSystemSet::UpdateStateTick));
 	}
 }
