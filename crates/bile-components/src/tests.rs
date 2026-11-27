@@ -284,7 +284,7 @@ fn diffs_applied_later_reach_the_component() {
 	dirty(&mut app, Some(5));
 	app.update();
 	assert_eq!(producer(&app, source).requests, vec![3]);
-	app.world_mut().run_system_once(move |mut passer: DataPasser<Num>| passer.pass_diffed_data(adder, &3, Some(Value(35)))).unwrap();
+	app.world_mut().run_system_once(move |mut passer: bile_data::simple::diff::DataPasser<Num>| passer.pass_data(adder, &3, Some(Value(35)))).unwrap();
 	app.update();
 	assert_eq!(app.world().get::<Value>(entity), Some(&Value(35)));
 }

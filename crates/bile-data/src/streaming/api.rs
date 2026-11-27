@@ -80,14 +80,12 @@ pub trait StorageFulfillerAPI<DT: DataType> {
 	fn push(&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
 		stream_id: StreamId,
-		params: &DT::Params, // Why pass params? stream_id should have all the infomation needed. Look into this and remove it if we can just use stream_id. Less is more!
 		dirty_state: DirtyState,
 		data: DT::Data,
 	);
 	fn finish(&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
 		stream_id: StreamId,
-		params: &DT::Params,
 	);
 	fn dirty_data(&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,

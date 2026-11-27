@@ -26,10 +26,11 @@ impl<DT: DataType> DynParam<StorageFulfillerParams<DT>> for StorageFulfillerSyst
 pub struct Storage<DT: DataType> {
 	next_stream_id: u64,
 	streams: HashMap<DT::Params, HashMap<StreamId, (DirtyState, HashSet<Entity>, bool)>>, // Params -> Stream -> The allowed tick it was requested with, its requesters, and if anything was passed on it
+	stream_params: HashMap<StreamId, DT::Params>, // The fulfillers pass by the stream alone
 }
 
 impl<DT: DataType> Default for Storage<DT> {
-	fn default() -> Self { Self { next_stream_id: 0, streams: HashMap::default() } }
+	fn default() -> Self { Self { next_stream_id: 0, streams: HashMap::default(), stream_params: HashMap::default() } }
 }
 
 impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
@@ -47,6 +48,7 @@ impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 		let stream_id = StreamId(self.next_stream_id);
 		self.next_stream_id += 1;
 		streams.insert(stream_id, (request.allowed_tick, HashSet::from([requester]), false));
+		self.stream_params.insert(stream_id, request.params.clone());
 		let (mut fulfillers, mut fulfiller_params) = storage_params.get::<StorageRequesterSystemParams<DT>>();
 		let fulfiller = fulfillers.iter()
 			.filter_map(|(entity, fulfiller)| Some((fulfiller.cost(&mut fulfiller_params, &request)?, entity)))
@@ -67,8 +69,9 @@ impl<DT: DataType> StorageRequesterAPI<DT> for Storage<DT> {
 	) {
 		let Some(streams) = self.streams.get_mut(params) else { return; };
 		let mut cancelled = Vec::new();
-		streams.retain(|_, (allowed_tick, requesters, _)| {
+		streams.retain(|stream_id, (allowed_tick, requesters, _)| {
 			if !in_cancel_range(*allowed_tick, latest, oldest) || !requesters.remove(&requester) || !requesters.is_empty() { return true; }
+			self.stream_params.remove(stream_id);
 			cancelled.push(*allowed_tick);
 			false
 		});
@@ -89,10 +92,10 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 	fn push(&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
 		stream_id: StreamId,
-		params: &DT::Params,
 		dirty_state: DirtyState,
 		data: DT::Data,
 	) {
+		let Some(params) = self.stream_params.get(&stream_id) else { return; };
 		let Some((_, requesters, passed)) = self.streams.get_mut(params).and_then(|streams| streams.get_mut(&stream_id)) else { return; };
 		*passed = true;
 		let (mut requester_apis, mut requester_params) = storage_params.get::<StorageFulfillerSystemParams<DT>>();
@@ -105,8 +108,8 @@ impl<DT: DataType> StorageFulfillerAPI<DT> for Storage<DT> {
 	fn finish(&mut self,
 		storage_params: &mut DynStorageFulfillerParams<DT>,
 		stream_id: StreamId,
-		params: &DT::Params,
 	) {
+		let Some(params) = self.stream_params.get(&stream_id) else { return; };
 		let Some((_, requesters, passed)) = self.streams.get_mut(params).and_then(|streams| streams.get_mut(&stream_id)) else { return; };
 		*passed = true;
 		let (mut requester_apis, mut requester_params) = storage_params.get::<StorageFulfillerSystemParams<DT>>();

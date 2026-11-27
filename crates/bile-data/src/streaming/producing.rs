@@ -5,7 +5,6 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::{DataType, DirtyState, Request, StateTick, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}};
 use super::api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI, StreamId};
-use super::gather::GatherFulfiller;
 
 // ============================ Producing API ============================
 
@@ -84,8 +83,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
-	fulfiller: Option<ResMut<'w, FulfillerBookkeeping<DT>>>,
-	gather: Option<ResMut<'w, GatherFulfiller<DT>>>,
+	fulfiller: ResMut<'w, FulfillerBookkeeping<DT>>,
 	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
 	storage_params: DynStorageFulfillerParams<'w, 's, DT>,
 }
@@ -93,23 +91,17 @@ pub struct DataPasser<'w, 's, DT: DataType> {
 impl<DT: DataType> DataPasser<'_, '_, DT> {
 	// Only from the node that was asked for the stream, until it finished. Returns if it still streams, to finish it.
 	fn asked(&mut self, source_entity: Entity, stream_id: StreamId, params: &DT::Params) -> Option<&mut bool> {
-		let (_, entity, streaming) = self.fulfiller.as_mut()?.asked.get_mut(params)?.get_mut(&stream_id)?;
+		let (_, entity, streaming) = self.fulfiller.asked.get_mut(params)?.get_mut(&stream_id)?;
 		(*entity == source_entity && *streaming).then_some(streaming)
 	}
 	pub fn push(&mut self, source_entity: Entity, stream_id: StreamId, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
-		let gathered = self.gather.as_ref().is_some_and(|gather| gather.is_streaming(source_entity, stream_id, params));
-		if !gathered && self.asked(source_entity, stream_id, params).is_none() { return; }
-		self.storage.push(&mut self.storage_params, stream_id, params, dirty_state, data);
+		if self.asked(source_entity, stream_id, params).is_none() { return; }
+		self.storage.push(&mut self.storage_params, stream_id, dirty_state, data);
 	}
 	pub fn finish(&mut self, source_entity: Entity, stream_id: StreamId, params: &DT::Params) {
-		// A gathered stream is finished when every node of it finished
-		let gathered = self.gather.as_mut().and_then(|gather| gather.finish(source_entity, stream_id, params));
-		if gathered == Some(false) { return; }
-		if gathered.is_none() {
-			let Some(streaming) = self.asked(source_entity, stream_id, params) else { return; };
-			*streaming = false;
-		}
-		self.storage.finish(&mut self.storage_params, stream_id, params);
+		let Some(streaming) = self.asked(source_entity, stream_id, params) else { return; };
+		*streaming = false;
+		self.storage.finish(&mut self.storage_params, stream_id);
 	}
 }
 

@@ -1,17 +1,10 @@
 use std::{collections::HashMap, marker::PhantomData};
 
-use bevy::prelude::*;
+use bevy::{ecs::{resource::IsResource, system::SystemParam}, prelude::*};
 use bevy_trait_query::{One, RegisterExt};
 
 use crate::{DirtyState, cancel_range::in_cancel_range, dyn_system_params::{DynParam, RegisterDynParam}, setup::{DataType, Request}};
-use super::api::{DynFulfillerParams, FulfillerParams};
-
-// ARG! I think you did the same thing here that you did with gather.
-// I assume that to "passed later" you want the user to use the simple producing API.
-// The WHOLE point of bile is to decouple the code.
-// By doing trying to 'dedup' code you really just couple it and make it hard to change and understand.
-// I mean why should a diff applier use something like simple::producing::DataPasser. Who even says that the storage using these diffs supports simple::producing!
-// I want the same thing as I asked in gather. Impl a pass data just like simple::producing but ONLY for diffs. I want duplicate code. I dont want shared code.
+use super::api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerParams, StorageFulfillerAPI};
 
 // ============================ Diff Fulfiller API ============================
 
@@ -64,7 +57,7 @@ impl<DT: DataType> DynParam<FulfillerParams<DT>> for DiffFulfillerSystemParams<D
 
 #[derive(Resource)]
 pub struct DiffFulfiller<DT: DataType> {
-	pub(crate) entity: Entity, // The resource entity, the storage knows the diff results by it
+	this_entity: Entity,
 	applying: HashMap<DT::Params, HashMap<Entity, Option<DirtyState>>>, // Params -> Diff applying node -> The requested dirty state, None if that was cancelled
 }
 
@@ -77,7 +70,7 @@ impl<DT: DataType> DiffFulfiller<DT> {
 			.filter_map(|(node, entity)| Some((node.diff_cost(request, diffs)?, entity))).min_by(|a, b| a.0.total_cmp(&b.0))
 	}
 	// If the node was asked for the data and that was not cancelled
-	pub(crate) fn applied(&mut self, source_entity: Entity, params: &DT::Params) -> bool {
+	fn applied(&mut self, source_entity: Entity, params: &DT::Params) -> bool {
 		let Some(applying) = self.applying.get_mut(params) else { return false; };
 		let wanted = applying.remove(&source_entity).flatten();
 		if applying.is_empty() { self.applying.remove(params); }
@@ -123,6 +116,24 @@ impl<DT: DataType> DiffFulfillerAPI<DT> for DiffFulfiller<DT> {
 	}
 }
 
+// ============================ Data Passer ============================
+
+#[derive(SystemParam)]
+pub struct DataPasser<'w, 's, DT: DataType> {
+	diff_fulfiller: ResMut<'w, DiffFulfiller<DT>>,
+	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
+	storage_params: DynStorageFulfillerParams<'w, 's, DT>,
+}
+
+impl<DT: DataType> DataPasser<'_, '_, DT> {
+	// A diff applying node passes the data it did not apply the diffs to right away
+	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, data: DT::Data) {
+		if !self.diff_fulfiller.applied(source_entity, params) { return; }
+		// The storage knows the state from the dirties it gave, this one means nothing
+		self.storage.pass_data(&mut self.storage_params, self.diff_fulfiller.this_entity, params, DirtyState::Dirty { tick: 0 }, data);
+	}
+}
+
 pub trait BileRegisterDiff {
 	fn register_diff_applier<DT, C>(&mut self) -> &mut Self
 	where DT: DataType, C: Component + DiffApplyingNode<DT>;
@@ -133,9 +144,8 @@ impl BileRegisterDiff for App {
 	where DT: DataType, C: Component + DiffApplyingNode<DT>,
 	{
 		if !self.world().contains_resource::<DiffFulfiller<DT>>() {
-			self.insert_resource(DiffFulfiller::<DT> { entity: Entity::PLACEHOLDER, applying: HashMap::default() });
-			let entity = self.world().resource_entity::<DiffFulfiller<DT>>().expect("It was just inserted");
-			self.world_mut().resource_mut::<DiffFulfiller<DT>>().entity = entity;
+			self.insert_resource(DiffFulfiller::<DT> { this_entity: Entity::PLACEHOLDER, applying: HashMap::default() });
+			self.world_mut().resource_mut::<DiffFulfiller<DT>>().this_entity = self.world().resource_entity::<DiffFulfiller<DT>>().expect("It was just inserted");
 		}
 		self.register_component_as::<dyn DiffApplyingNode<DT>, C>()
 			.register_component_as::<dyn DiffFulfillerAPI<DT>, DiffFulfiller<DT>>()

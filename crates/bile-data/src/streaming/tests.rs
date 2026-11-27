@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::{BileDataPlugin, DataType, DirtyState, Request};
 
-use super::{gather::BileRegisterGather, api::StreamId};
+use super::{gather::{self, BileRegisterGather}, api::StreamId};
 use super::consuming::{BileRegisterStreamingConsumer, ConsumingNodeAPI, Requester};
 use super::producing::{BileRegisterStreamingProducer, DataDirtier, DataPasser, ProducingNodeAPI};
 use super::storage::BileAddStreamingStorage;
@@ -26,6 +26,11 @@ impl Producer {
 	fn new(cost: Option<f32>) -> Self { Self { cost, requests: Vec::new(), cancels: Vec::new() } }
 }
 impl ProducingNodeAPI<Parts> for Producer {
+	fn cost(&self, _request: &Request<Parts>) -> Option<f32> { self.cost }
+	fn request(&mut self, stream_id: StreamId, request: Request<Parts>) { self.requests.push((stream_id, request.params, request.allowed_tick)); }
+	fn cancel(&mut self, params: &u32, latest: DirtyState, oldest: Option<u64>) { self.cancels.push((*params, latest, oldest)); }
+}
+impl gather::ProducingNodeAPI<Parts> for Producer {
 	fn cost(&self, _request: &Request<Parts>) -> Option<f32> { self.cost }
 	fn request(&mut self, stream_id: StreamId, request: Request<Parts>) { self.requests.push((stream_id, request.params, request.allowed_tick)); }
 	fn cancel(&mut self, params: &u32, latest: DirtyState, oldest: Option<u64>) { self.cancels.push((*params, latest, oldest)); }
@@ -63,6 +68,12 @@ fn push(app: &mut App, source: Entity, stream_id: StreamId, params: u32, data: u
 }
 fn finish(app: &mut App, source: Entity, stream_id: StreamId, params: u32) {
 	app.world_mut().run_system_once(move |mut passer: DataPasser<Parts>| passer.finish(source, stream_id, &params)).unwrap();
+}
+fn gather_push(app: &mut App, source: Entity, stream_id: StreamId, params: u32, data: u32) {
+	app.world_mut().run_system_once(move |mut passer: gather::DataPasser<Parts>| passer.push(source, stream_id, &params, UP_TO_DATE, data)).unwrap();
+}
+fn gather_finish(app: &mut App, source: Entity, stream_id: StreamId, params: u32) {
+	app.world_mut().run_system_once(move |mut passer: gather::DataPasser<Parts>| passer.finish(source, stream_id, &params)).unwrap();
 }
 fn mark_dirty(app: &mut App, params: u32, last_clean_tick: u64, diff: Option<u32>) {
 	app.world_mut().run_system_once(move |mut dirtier: DataDirtier<Parts>| dirtier.mark_dirty(&params, last_clean_tick, diff.as_ref())).unwrap();
@@ -150,7 +161,7 @@ fn dirty_reaches_the_nodes_with_data_and_does_not_cancel() {
 }
 
 #[test]
-#[should_panic(expected = "No fulfiller of bile_data::streaming_tests::Parts")]
+#[should_panic(expected = "No fulfiller of bile_data::streaming::tests::Parts")]
 fn a_request_no_fulfiller_can_take_panics() {
 	let mut app = streaming_app();
 	let a = app.world_mut().spawn(Consumer::default()).id();
@@ -207,14 +218,14 @@ fn gather_asks_every_node_that_can_and_finishes_when_all_did() {
 	assert_eq!(producer(&app, x).requests, vec![(stream, 3, UP_TO_DATE)]);
 	assert_eq!(producer(&app, y).requests, vec![(stream, 3, UP_TO_DATE)]);
 	assert!(producer(&app, z).requests.is_empty());
-	push(&mut app, x, stream, 3, 10);
-	finish(&mut app, x, stream, 3);
+	gather_push(&mut app, x, stream, 3, 10);
+	gather_finish(&mut app, x, stream, 3);
 	// a node that finished or was not asked passes nothing
-	push(&mut app, x, stream, 3, 90);
-	push(&mut app, z, stream, 3, 99);
+	gather_push(&mut app, x, stream, 3, 90);
+	gather_push(&mut app, z, stream, 3, 99);
 	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10"]);
-	push(&mut app, y, stream, 3, 20);
-	finish(&mut app, y, stream, 3);
+	gather_push(&mut app, y, stream, 3, 20);
+	gather_finish(&mut app, y, stream, 3);
 	assert_eq!(events(&app, a), vec!["push 3 UpToDate 10", "push 3 UpToDate 20", "finish 3"]);
 	cancel(&mut app, a, 3, UP_TO_DATE, None);
 	assert_eq!(producer(&app, x).cancels, vec![(3, UP_TO_DATE, None)]);

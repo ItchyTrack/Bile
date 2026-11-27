@@ -5,7 +5,6 @@ use bevy_trait_query::{One, RegisterExt};
 
 use crate::{btree_drain, cancel_range::{cancel_range, in_cancel_range, unheld_ranges}, DataType, DirtyState, Request, StateTick, dyn_system_params::{DynParam, RegisterDynParam}};
 use super::api::{DynFulfillerParams, DynStorageFulfillerParams, FulfillerAPI, FulfillerParams, StorageFulfillerAPI};
-use super::diff::DiffFulfiller;
 
 // ============================ Producing API ============================
 
@@ -95,8 +94,7 @@ impl<DT: DataType> FulfillerAPI<DT> for FulfillerBookkeeping<DT> {
 
 #[derive(SystemParam)]
 pub struct DataPasser<'w, 's, DT: DataType> {
-	fulfiller: Option<ResMut<'w, FulfillerBookkeeping<DT>>>,
-	diff_fulfiller: Option<ResMut<'w, DiffFulfiller<DT>>>,
+	fulfiller: ResMut<'w, FulfillerBookkeeping<DT>>,
 	storage: Single<'w, 's, One<&'static mut dyn StorageFulfillerAPI<DT>>, With<IsResource>>,
 	storage_params: DynStorageFulfillerParams<'w, 's, DT>,
 }
@@ -104,21 +102,13 @@ pub struct DataPasser<'w, 's, DT: DataType> {
 impl<DT: DataType> DataPasser<'_, '_, DT> {
 	pub fn pass_data(&mut self, source_entity: Entity, params: &DT::Params, dirty_state: DirtyState, data: DT::Data) {
 		// Only from the nodes that were asked for the data
-		let Some(fulfiller) = self.fulfiller.as_mut() else { return; };
-		let Some((storage, nodes)) = fulfiller.asked.get_mut(params) else { return; };
+		let Some((storage, nodes)) = self.fulfiller.asked.get_mut(params) else { return; };
 		let Some(node) = nodes.get_mut(&source_entity) else { return; };
 		// The freshest of the requests the data satisfies is what the data is kept for
 		for (waiting, used) in [node, storage] {
 			if let Some(&wanted) = btree_drain::set_drain_range(waiting, ..=dirty_state).last() { *used = Some(wanted); }
 		}
-		self.storage.pass_data(&mut self.storage_params, fulfiller.this_entity, params, dirty_state, data);
-	}
-	// A diff applying node passes the data it did not apply the diffs to right away
-	pub fn pass_diffed_data(&mut self, source_entity: Entity, params: &DT::Params, data: DT::Data) {
-		let Some(diff_fulfiller) = self.diff_fulfiller.as_mut() else { return; };
-		if !diff_fulfiller.applied(source_entity, params) { return; }
-		// The storage knows the state from the dirties it gave, this one means nothing
-		self.storage.pass_data(&mut self.storage_params, diff_fulfiller.entity, params, DirtyState::Dirty { tick: 0 }, data);
+		self.storage.pass_data(&mut self.storage_params, self.fulfiller.this_entity, params, dirty_state, data);
 	}
 }
 // ============================ Data Dirtier ============================

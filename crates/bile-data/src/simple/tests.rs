@@ -91,7 +91,7 @@ fn pass(app: &mut App, source: Entity, params: u32, dirty_state: DirtyState, dat
 	app.world_mut().run_system_once(move |mut passer: DataPasser<Sum>| passer.pass_data(source, &params, dirty_state, data)).unwrap();
 }
 fn pass_diffed(app: &mut App, source: Entity, params: u32, data: u32) {
-	app.world_mut().run_system_once(move |mut passer: DataPasser<Sum>| passer.pass_diffed_data(source, &params, data)).unwrap();
+	app.world_mut().run_system_once(move |mut passer: super::diff::DataPasser<Sum>| passer.pass_data(source, &params, data)).unwrap();
 }
 fn mark_dirty(app: &mut App, params: u32, last_clean_tick: u64, diff: Option<u32>) {
 	app.world_mut().run_system_once(move |mut dirtier: DataDirtier<Sum>| dirtier.mark_dirty(&params, last_clean_tick, diff.as_ref())).unwrap();
@@ -179,7 +179,7 @@ fn dirty_reaches_the_nodes_with_the_data_and_newer_data_is_requested_again() {
 }
 
 #[test]
-#[should_panic(expected = "No fulfiller of bile_data::tests::Sum")]
+#[should_panic(expected = "No fulfiller of bile_data::simple::tests::Sum")]
 fn a_request_no_fulfiller_can_take_panics() {
 	let mut app = sum_app();
 	let a = app.world_mut().spawn(Consumer::default()).id();
